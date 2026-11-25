@@ -502,6 +502,7 @@ fn twin_texture(
             &mut texture,
         )
     };
+    crate::census::made(6, 0);
     if let Err(e) = made {
         tracing::warn!(error = %e, desc = ?d, "no colour twin for a depth texture");
     }
@@ -2763,6 +2764,7 @@ fn host_texture_as(
             )
         }
     };
+    crate::census::made(if reserved { 5 } else { 4 }, 0);
     if let Err(e) = &made {
         crate::residency::allocation_error(&e);
         tracing::warn!(error = %e, desc = ?d, reserved, "no host texture");

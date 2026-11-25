@@ -96,6 +96,7 @@ pub extern "system" fn XMemVirtualAlloc(
         materialize_for(base as usize, size, Touch::TitleCall);
     }
     let (lowest, highest) = address_range(flags);
+    let (asked_kind, asked_protect) = (kind, protect);
     let mut requirements = MEM_ADDRESS_REQUIREMENTS {
         LowestStartingAddress: lowest as *mut c_void,
         HighestEndingAddress: highest as *mut c_void,
@@ -173,6 +174,9 @@ pub extern "system" fn XMemVirtualAlloc(
         }
     }
     if base.is_null() {
+        // The census keeps what the title asked for (`VICTORY_CENSUS`).
+        #[cfg(windows)]
+        victory_gpu::title_memory_reserved(at as usize, size, asked_kind, flags, asked_protect);
         tracing::debug!(
             size,
             kind = format_args!("{kind:#x}"),
