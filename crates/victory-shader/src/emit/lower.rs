@@ -13123,7 +13123,10 @@ impl<'a> Lower<'a> {
         // 14-25 frames in, in a minimap or shadow mesh draw; with every
         // loop cut at 64 it ran 90 frames. Raise them again once shaders
         // stop reading data that is not there yet.)
-        let limit = match super::loop_limit() {
+        // Compute programs: `VICTORY_SHADER_LOOP_LIMIT_CS` if set (`compute_loop_limit`).
+        let compute = !self.s.pixel && self.s.mesh.is_none() && self.s.threads.is_some();
+        let named = if compute { super::compute_loop_limit() } else { super::loop_limit() };
+        let limit = match named {
             LOOP_LIMIT if self.s.pixel => 1 << 7,
             LOOP_LIMIT if self.s.mesh.is_some() || self.s.threads.is_none() => 1 << 8,
             LOOP_LIMIT => 1 << 12,
