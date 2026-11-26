@@ -32,9 +32,12 @@
 //! - [`LICM`]: pure, non-trapping loop-invariant instructions are hoisted out
 //!   of natural loops to their dominating preheader (splitting a conditional
 //!   entry edge lazily when needed).
-//! - [`BARRIERS`]: an immediately redundant `dx.op.barrier(mode)` in the same
-//!   block is dropped when an earlier barrier covers all of its mode bits with
-//!   no intervening memory or lane-dependent operations.
+//! - [`BARRIERS`]: redundant `dx.op.barrier(mode)` calls within a block are
+//!   dropped when an earlier barrier covers all of their mode bits — either
+//!   immediately across pure ALU, or between consecutive non-escaping LDS
+//!   (`space 3`) read phases bounded by a covering group+TGSM barrier before
+//!   and either a covering barrier or shader return after, with no intervening
+//!   stores, atomics, resource/lane calls, or control-flow edges.
 //!
 //! Which passes run is `emit::shader_opt()` (`VICTORY_SHADER_OPT`), part of
 //! the translation and so of the shader cache's key.
@@ -266,6 +269,80 @@ fn write_kind(f: &Func) -> WriteKind {
 struct PrivateVals {
     const_vals: HashMap<(u32, Vec<u64>), V>,
     dyn_vals: HashMap<(u32, V, Ty), V>,
+}
+
+/// Intra-block `dx.op.barrier` tracking for [`BARRIERS`]: eliminates both
+/// immediately adjacent covered barriers and read-after-read barriers between
+/// non-escaping LDS (`space == 3`) loads when bounded on the left by a covering
+/// group+TGSM barrier (`mode & 9 == 9`) and on the right by either a covering
+/// group+TGSM barrier or `Term::Ret` (when `mid_mode` has no UAV fence bits),
+/// with no intervening stores, atomics, resource/wave calls, or branches.
+#[derive(Default)]
+struct BarrierState {
+    /// Mode of the last barrier when no memory or lane op has run since it.
+    adj: Option<u64>,
+    rar: RarState,
+}
+
+#[derive(Default, Clone, Copy)]
+enum RarState {
+    #[default]
+    None,
+    /// Saw `B_anchor(anchor_mode)` with `(anchor_mode & 9) == 9`.
+    AfterAnchor {
+        anchor_mode: u64,
+        saw_lds_load: bool,
+    },
+    /// Saw `B_anchor -> [>=1 LDS load] -> B_mid(mid_mode)` at `kept[mid_pos]`.
+    AfterMid {
+        anchor_mode: u64,
+        mid_mode: u64,
+        mid_pos: usize,
+        saw_lds_load: bool,
+    },
+    /// Saw `B_anchor -> [>=1 LDS load] -> B_mid -> [>=1 LDS load]` where
+    /// `(mid_mode & 1) != 0` and `mid_mode` has no UAV fence bits, followed
+    /// only by non-atomic UAV or stage-output stores; drops `B_mid` if the
+    /// block terminates in `Term::Ret`.
+    TailBeforeRet {
+        mid_pos: usize,
+    },
+}
+
+impl BarrierState {
+    fn reset(&mut self) {
+        self.adj = None;
+        self.rar = RarState::None;
+    }
+
+    fn on_load(&mut self, root: PtrRoot) {
+        self.adj = None;
+        match root {
+            PtrRoot::ConstGlobal(_) | PtrRoot::PrivateGlobal(_) => {}
+            PtrRoot::SharedGlobal(_) => match &mut self.rar {
+                RarState::AfterAnchor { saw_lds_load, .. }
+                | RarState::AfterMid { saw_lds_load, .. } => *saw_lds_load = true,
+                RarState::TailBeforeRet { .. } | RarState::None => {}
+            },
+            PtrRoot::Unknown => self.rar = RarState::None,
+        }
+    }
+
+    fn on_non_lds_sink_store(&mut self) {
+        self.adj = None;
+        self.rar = match self.rar {
+            RarState::AfterMid {
+                mid_mode,
+                mid_pos,
+                saw_lds_load: true,
+                ..
+            } if (mid_mode & 1) != 0 && mid_mode & !(1 | 8) == 0 => {
+                RarState::TailBeforeRet { mid_pos }
+            }
+            RarState::TailBeforeRet { mid_pos } => RarState::TailBeforeRet { mid_pos },
+            _ => RarState::None,
+        };
+    }
 }
 
 /// A natural loop detected via the dominator tree.
@@ -1630,8 +1707,8 @@ impl Module {
             } else {
                 PrivateVals::default()
             };
-            let mut last_barrier: Option<u64> = None;
-            let mut dropped_store = false;
+            let mut barriers = BarrierState::default();
+            let mut dropped_kept = false;
             // Two joins of the same values from the same blocks are one.
             if passes & REUSE != 0 && self.blocks[b].phis.len() > 1 {
                 let mut joins: HashMap<Vec<(usize, V)>, V> = HashMap::new();
@@ -1707,97 +1784,96 @@ impl Module {
                     known.insert(key.clone(), V::Inst(i));
                     added.push(key);
                 }
-                // Any retained memory or lane op breaks adjacency between barriers.
-                let mut clear_barrier = match &self.insts[i as usize].op {
-                    Op::Load(_) | Op::Store(..) | Op::AtomicRmw(..) | Op::CmpXchg(..) => true,
-                    Op::Call(f, _) => {
-                        class != Effect::Pure
-                            || self.funcs[*f as usize].attr != Some(Attr::ReadNone)
-                    }
-                    _ => false,
-                };
                 match self.insts[i as usize].op.clone() {
-                    Op::Load(ptr) if class != Effect::Pure => {
-                        if passes & LOADS != 0 {
+                    Op::Load(_) if class == Effect::Pure => {
+                        barriers.on_load(PtrRoot::ConstGlobal(0));
+                    }
+                    Op::Load(ptr) => {
+                        if passes & (LOADS | BARRIERS) != 0 {
                             let val_ty = self.insts[i as usize].ty;
                             let (root, raw_path) = self.trace_ptr(ptr, &escaped);
-                            let path = match raw_path {
-                                PtrPath::Const(leaf_ty, cp) if leaf_ty == val_ty => {
-                                    PtrPath::Const(leaf_ty, cp)
+                            if passes & LOADS != 0 {
+                                let path = match raw_path {
+                                    PtrPath::Const(leaf_ty, cp) if leaf_ty == val_ty => {
+                                        PtrPath::Const(leaf_ty, cp)
+                                    }
+                                    _ => PtrPath::Dynamic,
+                                };
+                                match root {
+                                    PtrRoot::PrivateGlobal(g) => {
+                                        let hit = match &path {
+                                            PtrPath::Const(_, cp) => {
+                                                priv_vals.const_vals.get(&(g, cp.clone())).copied()
+                                            }
+                                            PtrPath::Dynamic => {
+                                                priv_vals.dyn_vals.get(&(g, ptr, val_ty)).copied()
+                                            }
+                                        };
+                                        if let Some(v) = hit {
+                                            repl[i as usize] = Some(v);
+                                            changed = true;
+                                            continue;
+                                        }
+                                        match path {
+                                            PtrPath::Const(_, cp) => {
+                                                pending_const_stores
+                                                    .retain(|(pg, pp), _| !(*pg == g && *pp == cp));
+                                                pending_dyn_stores.retain(|(pg, _, _), _| *pg != g);
+                                                priv_vals.const_vals.insert((g, cp), V::Inst(i));
+                                            }
+                                            PtrPath::Dynamic => {
+                                                pending_const_stores.retain(|(pg, _), _| *pg != g);
+                                                pending_dyn_stores.retain(|(pg, _, _), _| *pg != g);
+                                                priv_vals
+                                                    .dyn_vals
+                                                    .insert((g, ptr, val_ty), V::Inst(i));
+                                            }
+                                        }
+                                    }
+                                    PtrRoot::SharedGlobal(g) => {
+                                        let hit = match &path {
+                                            PtrPath::Const(_, cp) => {
+                                                shared_const.get(&(g, cp.clone())).copied()
+                                            }
+                                            PtrPath::Dynamic => {
+                                                shared_dyn.get(&(g, ptr, val_ty)).copied()
+                                            }
+                                        };
+                                        if let Some(v) = hit {
+                                            repl[i as usize] = Some(v);
+                                            changed = true;
+                                            continue;
+                                        }
+                                        match path {
+                                            PtrPath::Const(_, cp) => {
+                                                pending_const_stores
+                                                    .retain(|(pg, pp), _| !(*pg == g && *pp == cp));
+                                                pending_dyn_stores.retain(|(pg, _, _), _| *pg != g);
+                                                shared_const.insert((g, cp), V::Inst(i));
+                                            }
+                                            PtrPath::Dynamic => {
+                                                pending_const_stores.retain(|(pg, _), _| *pg != g);
+                                                pending_dyn_stores.retain(|(pg, _, _), _| *pg != g);
+                                                shared_dyn.insert((g, ptr, val_ty), V::Inst(i));
+                                            }
+                                        }
+                                    }
+                                    PtrRoot::Unknown => {
+                                        if let Some(&first) = unknown_loads.get(&ptr)
+                                            && self.type_of(first) == val_ty
+                                        {
+                                            repl[i as usize] = Some(first);
+                                            changed = true;
+                                            continue;
+                                        }
+                                        unknown_loads.insert(ptr, V::Inst(i));
+                                    }
+                                    PtrRoot::ConstGlobal(_) => {}
                                 }
-                                _ => PtrPath::Dynamic,
-                            };
-                            match root {
-                                PtrRoot::PrivateGlobal(g) => {
-                                    let hit = match &path {
-                                        PtrPath::Const(_, cp) => {
-                                            priv_vals.const_vals.get(&(g, cp.clone())).copied()
-                                        }
-                                        PtrPath::Dynamic => {
-                                            priv_vals.dyn_vals.get(&(g, ptr, val_ty)).copied()
-                                        }
-                                    };
-                                    if let Some(v) = hit {
-                                        repl[i as usize] = Some(v);
-                                        changed = true;
-                                        continue;
-                                    }
-                                    match path {
-                                        PtrPath::Const(_, cp) => {
-                                            pending_const_stores
-                                                .retain(|(pg, pp), _| !(*pg == g && *pp == cp));
-                                            pending_dyn_stores.retain(|(pg, _, _), _| *pg != g);
-                                            priv_vals.const_vals.insert((g, cp), V::Inst(i));
-                                        }
-                                        PtrPath::Dynamic => {
-                                            pending_const_stores.retain(|(pg, _), _| *pg != g);
-                                            pending_dyn_stores.retain(|(pg, _, _), _| *pg != g);
-                                            priv_vals
-                                                .dyn_vals
-                                                .insert((g, ptr, val_ty), V::Inst(i));
-                                        }
-                                    }
-                                }
-                                PtrRoot::SharedGlobal(g) => {
-                                    let hit = match &path {
-                                        PtrPath::Const(_, cp) => {
-                                            shared_const.get(&(g, cp.clone())).copied()
-                                        }
-                                        PtrPath::Dynamic => {
-                                            shared_dyn.get(&(g, ptr, val_ty)).copied()
-                                        }
-                                    };
-                                    if let Some(v) = hit {
-                                        repl[i as usize] = Some(v);
-                                        changed = true;
-                                        continue;
-                                    }
-                                    match path {
-                                        PtrPath::Const(_, cp) => {
-                                            pending_const_stores
-                                                .retain(|(pg, pp), _| !(*pg == g && *pp == cp));
-                                            pending_dyn_stores.retain(|(pg, _, _), _| *pg != g);
-                                            shared_const.insert((g, cp), V::Inst(i));
-                                        }
-                                        PtrPath::Dynamic => {
-                                            pending_const_stores.retain(|(pg, _), _| *pg != g);
-                                            pending_dyn_stores.retain(|(pg, _, _), _| *pg != g);
-                                            shared_dyn.insert((g, ptr, val_ty), V::Inst(i));
-                                        }
-                                    }
-                                }
-                                PtrRoot::Unknown => {
-                                    if let Some(&first) = unknown_loads.get(&ptr)
-                                        && self.type_of(first) == val_ty
-                                    {
-                                        repl[i as usize] = Some(first);
-                                        changed = true;
-                                        continue;
-                                    }
-                                    unknown_loads.insert(ptr, V::Inst(i));
-                                }
-                                PtrRoot::ConstGlobal(_) => {}
                             }
+                            barriers.on_load(root);
+                        } else {
+                            barriers.reset();
                         }
                     }
                     Op::Store(ptr, val) => {
@@ -1820,7 +1896,7 @@ impl Module {
                                         }
                                         if let Some(prev) = pending_const_stores.remove(&slot) {
                                             kept[prev] = u32::MAX;
-                                            dropped_store = true;
+                                            dropped_kept = true;
                                             changed = true;
                                         }
                                         priv_vals.dyn_vals.retain(|(pg, _, _), _| *pg != g);
@@ -1829,7 +1905,7 @@ impl Module {
                                         let pos = kept.len();
                                         kept.push(i);
                                         pending_const_stores.insert(slot, pos);
-                                        last_barrier = None;
+                                        barriers.reset();
                                         continue;
                                     }
                                     PtrPath::Dynamic => {
@@ -1840,7 +1916,7 @@ impl Module {
                                         }
                                         if let Some(prev) = pending_dyn_stores.remove(&slot) {
                                             kept[prev] = u32::MAX;
-                                            dropped_store = true;
+                                            dropped_kept = true;
                                             changed = true;
                                         }
                                         pending_const_stores.retain(|(pg, _), _| *pg != g);
@@ -1851,7 +1927,7 @@ impl Module {
                                         let pos = kept.len();
                                         kept.push(i);
                                         pending_dyn_stores.insert(slot, pos);
-                                        last_barrier = None;
+                                        barriers.reset();
                                         continue;
                                     }
                                 },
@@ -1860,7 +1936,7 @@ impl Module {
                                         let slot = (g, cp);
                                         if let Some(prev) = pending_const_stores.remove(&slot) {
                                             kept[prev] = u32::MAX;
-                                            dropped_store = true;
+                                            dropped_kept = true;
                                             changed = true;
                                         }
                                         shared_dyn.retain(|(pg, _, _), _| *pg != g);
@@ -1869,14 +1945,14 @@ impl Module {
                                         let pos = kept.len();
                                         kept.push(i);
                                         pending_const_stores.insert(slot, pos);
-                                        last_barrier = None;
+                                        barriers.reset();
                                         continue;
                                     }
                                     PtrPath::Dynamic => {
                                         let slot = (g, ptr, val_ty);
                                         if let Some(prev) = pending_dyn_stores.remove(&slot) {
                                             kept[prev] = u32::MAX;
-                                            dropped_store = true;
+                                            dropped_kept = true;
                                             changed = true;
                                         }
                                         pending_const_stores.retain(|(pg, _), _| *pg != g);
@@ -1887,7 +1963,7 @@ impl Module {
                                         let pos = kept.len();
                                         kept.push(i);
                                         pending_dyn_stores.insert(slot, pos);
-                                        last_barrier = None;
+                                        barriers.reset();
                                         continue;
                                     }
                                 },
@@ -1896,6 +1972,7 @@ impl Module {
                                 }
                             }
                         }
+                        barriers.reset();
                     }
                     Op::AtomicRmw(_, ptr, _) | Op::CmpXchg(ptr, _, _) => {
                         if passes & LOADS != 0 {
@@ -1918,6 +1995,7 @@ impl Module {
                                 }
                             }
                         }
+                        barriers.reset();
                     }
                     Op::Call(f, args) => match class {
                         Effect::Reads => {
@@ -1931,6 +2009,7 @@ impl Module {
                                 }
                                 read_mem.insert(key, V::Inst(i));
                             }
+                            barriers.reset();
                         }
                         Effect::Lanes => {
                             if passes & LOADS != 0
@@ -1943,6 +2022,7 @@ impl Module {
                                 }
                                 read_lanes.insert(key, V::Inst(i));
                             }
+                            barriers.reset();
                         }
                         Effect::Writes => match write_kind(&self.funcs[f as usize]) {
                             WriteKind::Barrier => {
@@ -1955,14 +2035,82 @@ impl Module {
                                 };
                                 if passes & BARRIERS != 0
                                     && self.is_void(self.insts[i as usize].ty)
-                                    && let (Some(prev), Some(m)) = (last_barrier, mode)
-                                    && (prev & m) == m
                                 {
-                                    changed = true;
-                                    continue;
+                                    if let (Some(prev), Some(m)) = (barriers.adj, mode)
+                                        && (prev & m) == m
+                                    {
+                                        changed = true;
+                                        continue;
+                                    }
+                                    if let Some(m) = mode {
+                                        let next_pos = kept.len();
+                                        barriers.rar = match barriers.rar {
+                                            RarState::AfterAnchor {
+                                                anchor_mode,
+                                                saw_lds_load: true,
+                                            } if (m & 9) != 0 && (anchor_mode & m) == m => {
+                                                RarState::AfterMid {
+                                                    anchor_mode,
+                                                    mid_mode: m,
+                                                    mid_pos: next_pos,
+                                                    saw_lds_load: false,
+                                                }
+                                            }
+                                            RarState::AfterMid {
+                                                anchor_mode,
+                                                mid_mode,
+                                                mid_pos,
+                                                saw_lds_load: true,
+                                            } => {
+                                                if (m & 9) == 9 && (m & mid_mode) == mid_mode {
+                                                    kept[mid_pos] = u32::MAX;
+                                                    dropped_kept = true;
+                                                    changed = true;
+                                                    if (anchor_mode & m) == m {
+                                                        RarState::AfterMid {
+                                                            anchor_mode,
+                                                            mid_mode: m,
+                                                            mid_pos: next_pos,
+                                                            saw_lds_load: false,
+                                                        }
+                                                    } else {
+                                                        RarState::AfterAnchor {
+                                                            anchor_mode: m,
+                                                            saw_lds_load: false,
+                                                        }
+                                                    }
+                                                } else if (mid_mode & 9) == 9
+                                                    && (m & 9) != 0
+                                                    && (mid_mode & m) == m
+                                                {
+                                                    RarState::AfterMid {
+                                                        anchor_mode: mid_mode,
+                                                        mid_mode: m,
+                                                        mid_pos: next_pos,
+                                                        saw_lds_load: false,
+                                                    }
+                                                } else if (m & 9) == 9 {
+                                                    RarState::AfterAnchor {
+                                                        anchor_mode: m,
+                                                        saw_lds_load: false,
+                                                    }
+                                                } else {
+                                                    RarState::None
+                                                }
+                                            }
+                                            _ if (m & 9) == 9 => RarState::AfterAnchor {
+                                                anchor_mode: m,
+                                                saw_lds_load: false,
+                                            },
+                                            _ => RarState::None,
+                                        };
+                                        barriers.adj = Some(m);
+                                    } else {
+                                        barriers.reset();
+                                    }
+                                } else {
+                                    barriers.reset();
                                 }
-                                last_barrier = mode;
-                                clear_barrier = false;
                                 if passes & LOADS != 0 {
                                     let touches_lds = mode.is_none_or(|m| m & (1 | 8) != 0);
                                     let touches_uav = mode.is_none_or(|m| m & (1 | 2 | 4) != 0);
@@ -1982,9 +2130,20 @@ impl Module {
                                     }
                                 }
                             }
-                            WriteKind::OutputOnly => {}
+                            WriteKind::OutputOnly => {
+                                barriers.on_non_lds_sink_store();
+                            }
                             WriteKind::ResourceMemory => {
                                 read_mem.clear();
+                                let name = self.funcs[f as usize]
+                                    .name
+                                    .strip_prefix("dx.op.")
+                                    .unwrap_or(&self.funcs[f as usize].name);
+                                if name.starts_with("atomic") {
+                                    barriers.reset();
+                                } else {
+                                    barriers.on_non_lds_sink_store();
+                                }
                             }
                             WriteKind::All => {
                                 let is_discard = self.funcs[f as usize]
@@ -2002,18 +2161,41 @@ impl Module {
                                 if !is_discard {
                                     priv_vals = PrivateVals::default();
                                 }
+                                barriers.reset();
                             }
                         },
-                        Effect::Pure => {}
+                        Effect::Pure => {
+                            if self.funcs[f as usize].attr != Some(Attr::ReadNone) {
+                                barriers.reset();
+                            }
+                        }
                     },
+                    Op::Phi(_) => barriers.reset(),
                     _ => {}
-                }
-                if clear_barrier {
-                    last_barrier = None;
                 }
                 kept.push(i);
             }
-            if dropped_store {
+            if passes & BARRIERS != 0 && matches!(self.blocks[b].term, Some(Term::Ret)) {
+                match barriers.rar {
+                    RarState::AfterMid {
+                        mid_mode,
+                        mid_pos,
+                        saw_lds_load: true,
+                        ..
+                    } if (mid_mode & 1) != 0 && mid_mode & !(1 | 8) == 0 => {
+                        kept[mid_pos] = u32::MAX;
+                        dropped_kept = true;
+                        changed = true;
+                    }
+                    RarState::TailBeforeRet { mid_pos } => {
+                        kept[mid_pos] = u32::MAX;
+                        dropped_kept = true;
+                        changed = true;
+                    }
+                    _ => {}
+                }
+            }
+            if dropped_kept {
                 kept.retain(|&id| id != u32::MAX);
             }
             self.blocks[b].body = kept;
@@ -4283,6 +4465,304 @@ mod tests {
     }
 
     #[test]
+    fn read_after_read_barrier_coalescing_and_soundness_negatives() {
+        let trace_lds_ops = |m: &Module, b: usize| -> String {
+            m.blocks[b]
+                .body
+                .iter()
+                .filter_map(|&id| match &m.insts[id as usize].op {
+                    Op::Call(f, _) if m.funcs[*f as usize].name == "dx.op.barrier" => Some('B'),
+                    Op::Load(_) => Some('R'),
+                    Op::Store(..) => Some('W'),
+                    Op::AtomicRmw(..) | Op::CmpXchg(..) => Some('A'),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // 1) Positive: `write -> read -> read -> overwrite -> read` cuts 5 -> 4 barriers
+        //    under both `BARRIERS` and `ALL` (`BWBRBRBWBR` -> `BWBRRBWBR`).
+        for passes in [BARRIERS, ALL] {
+            let mut k = kit();
+            let (i32t, void) = (k.m.int(32), k.m.void());
+            let bty = k.m.func_ty(void, vec![i32t, i32t]);
+            k.m.ptr(bty);
+            let barrier = k.m.function("dx.op.barrier", bty, Some(Attr::NoDuplicate), false);
+            let arr = k.m.array(8, i32t);
+            let lds = k.m.global("lds", arr, 3);
+            let (k0, k1, k9, k80) = (k.m.i32(0), k.m.i32(1), k.m.i32(9), k.m.i32(80));
+            let v0 = k.m.call(k.b, k.reads, vec![k0, k1]);
+            let p0 = k.m.element(k.b, lds, k0);
+            let p1 = k.m.element(k.b, lds, k1);
+
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            k.m.store(k.b, p0, v0);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            let r1 = k.m.load(k.b, p1);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            let r2 = k.m.load(k.b, p0);
+            let next_v = k.m.bin(k.b, Bin::Add, r1, k1);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            k.m.store(k.b, p0, next_v);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            let r3 = k.m.load(k.b, p1);
+            k.m.call(k.b, k.writes, vec![r1, r2]);
+            k.m.call(k.b, k.writes, vec![r3, k0]);
+            k.m.terminate(k.b, Term::Ret);
+
+            assert_eq!(trace_lds_ops(&k.m, k.b), "BWBRBRBWBR");
+            k.m.optimise(passes);
+            assert_eq!(
+                trace_lds_ops(&k.m, k.b),
+                "BWBRRBWBR",
+                "middle read-after-read barrier must drop while write barriers stay (passes={passes})"
+            );
+            k.m.write();
+        }
+
+        // 2) Positive: 3 consecutive reads separated by pure ALU, `ReadNone` call,
+        //    and non-escaping `PrivateGlobal` load coalesce 5 -> 3 barriers (`BWBRRRBW`).
+        {
+            let mut k = kit();
+            let (i32t, void) = (k.m.int(32), k.m.void());
+            let bty = k.m.func_ty(void, vec![i32t, i32t]);
+            k.m.ptr(bty);
+            let barrier = k.m.function("dx.op.barrier", bty, Some(Attr::NoDuplicate), false);
+            let arr = k.m.array(8, i32t);
+            let lds = k.m.global("lds", arr, 3);
+            let priv_g = k.m.global("priv_g", arr, 0);
+            let (k0, k1, k2, k9, k80) = (
+                k.m.i32(0),
+                k.m.i32(1),
+                k.m.i32(2),
+                k.m.i32(9),
+                k.m.i32(80),
+            );
+            let v0 = k.m.call(k.b, k.reads, vec![k0, k1]);
+            let p0 = k.m.element(k.b, lds, k0);
+            let p1 = k.m.element(k.b, lds, k1);
+            let p2 = k.m.element(k.b, lds, k2);
+            let priv0 = k.m.element(k.b, priv_g, k0);
+            k.m.store(k.b, priv0, v0);
+
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            k.m.store(k.b, p0, v0);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            let r1 = k.m.load(k.b, p0);
+            let alu = k.m.bin(k.b, Bin::Xor, r1, k2);
+            let pure_c = k.m.call(k.b, k.pure, vec![alu, k1]);
+            let priv_ld = k.m.load(k.b, priv0);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            let r2 = k.m.load(k.b, p1);
+            let alu2 = k.m.bin(k.b, Bin::Add, pure_c, priv_ld);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            let r3 = k.m.load(k.b, p2);
+            let sum = k.m.bin(k.b, Bin::Add, r2, r3);
+            let sum = k.m.bin(k.b, Bin::Add, sum, alu2);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            k.m.store(k.b, p0, sum);
+            k.m.terminate(k.b, Term::Ret);
+
+            k.m.optimise(BARRIERS);
+            // Includes initial priv0 store ('W') and priv_ld ('R') between r1 and second barrier.
+            assert_eq!(trace_lds_ops(&k.m, k.b), "WBWBRRRRBW");
+            k.m.write();
+        }
+
+        // 3) Positive: end-of-shader `write -> read -> read -> bufferStore -> Ret`
+        //    (no trailing LDS overwrite) drops the middle barrier (`3 -> 2`, `BWBRR`).
+        {
+            let mut k = kit();
+            let (i32t, void) = (k.m.int(32), k.m.void());
+            let bty = k.m.func_ty(void, vec![i32t, i32t]);
+            k.m.ptr(bty);
+            let barrier = k.m.function("dx.op.barrier", bty, Some(Attr::NoDuplicate), false);
+            let arr = k.m.array(4, i32t);
+            let lds = k.m.global("lds", arr, 3);
+            let (k0, k1, k9, k80) = (k.m.i32(0), k.m.i32(1), k.m.i32(9), k.m.i32(80));
+            let v0 = k.m.call(k.b, k.reads, vec![k0, k1]);
+            let p0 = k.m.element(k.b, lds, k0);
+            let p1 = k.m.element(k.b, lds, k1);
+
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            k.m.store(k.b, p0, v0);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            let r1 = k.m.load(k.b, p0);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            let r2 = k.m.load(k.b, p1);
+            k.m.call(k.b, k.writes, vec![r1, r2]);
+            k.m.terminate(k.b, Term::Ret);
+
+            assert_eq!(trace_lds_ops(&k.m, k.b), "BWBRBR");
+            k.m.optimise(BARRIERS);
+            assert_eq!(trace_lds_ops(&k.m, k.b), "BWBRR");
+            k.m.write();
+        }
+
+        // 4) Negative: `write -> read -> write -> read` MUST keep all 4 barriers (`BWBRBWBR`).
+        {
+            let mut k = kit();
+            let (i32t, void) = (k.m.int(32), k.m.void());
+            let bty = k.m.func_ty(void, vec![i32t, i32t]);
+            k.m.ptr(bty);
+            let barrier = k.m.function("dx.op.barrier", bty, Some(Attr::NoDuplicate), false);
+            let arr = k.m.array(4, i32t);
+            let lds = k.m.global("lds", arr, 3);
+            let (k0, k1, k9, k80) = (k.m.i32(0), k.m.i32(1), k.m.i32(9), k.m.i32(80));
+            let v0 = k.m.call(k.b, k.reads, vec![k0, k1]);
+            let p0 = k.m.element(k.b, lds, k0);
+            let p1 = k.m.element(k.b, lds, k1);
+
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            k.m.store(k.b, p0, v0);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            let r1 = k.m.load(k.b, p1);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            k.m.store(k.b, p0, r1);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            let r2 = k.m.load(k.b, p1);
+            k.m.call(k.b, k.writes, vec![r1, r2]);
+            k.m.terminate(k.b, Term::Ret);
+
+            k.m.optimise(ALL);
+            assert_eq!(trace_lds_ops(&k.m, k.b), "BWBRBWBR");
+            k.m.write();
+        }
+
+        // 5) Negative: intervening LDS `AtomicRmw`, `CmpXchg`, UAV `atomicBinOp`,
+        //    `bufferLoad`, `bufferStore`, or `waveReadLaneFirst` between reads MUST keep barriers.
+        for kind in 0..6 {
+            let mut k = kit();
+            let (i32t, void) = (k.m.int(32), k.m.void());
+            let bty = k.m.func_ty(void, vec![i32t, i32t]);
+            k.m.ptr(bty);
+            let barrier = k.m.function("dx.op.barrier", bty, Some(Attr::NoDuplicate), false);
+            let fty_i32 = k.m.func_ty(i32t, vec![i32t, i32t]);
+            k.m.ptr(fty_i32);
+            let uav_atomic =
+                k.m.function("dx.op.atomicBinOp.i32", fty_i32, Some(Attr::NoUnwind), false);
+            let wave_op = k.m.function(
+                "dx.op.waveReadLaneFirst.i32",
+                fty_i32,
+                Some(Attr::NoUnwind),
+                false,
+            );
+            let arr = k.m.array(4, i32t);
+            let lds = k.m.global("lds", arr, 3);
+            let (k0, k1, k2, k9, k80) = (
+                k.m.i32(0),
+                k.m.i32(1),
+                k.m.i32(2),
+                k.m.i32(9),
+                k.m.i32(80),
+            );
+            let v0 = k.m.call(k.b, k.reads, vec![k0, k1]);
+            let p0 = k.m.element(k.b, lds, k0);
+            let p1 = k.m.element(k.b, lds, k1);
+            let p2 = k.m.element(k.b, lds, k2);
+
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            k.m.store(k.b, p0, v0);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            let r1 = k.m.load(k.b, p1);
+            let side = match kind {
+                0 => k.m.atomic(k.b, crate::emit::bitcode::Rmw::Add, p2, k1),
+                1 => k.m.cmpxchg(k.b, p2, k0, k1),
+                2 => k.m.call(k.b, uav_atomic, vec![r1, k1]),
+                3 => k.m.call(k.b, k.reads, vec![r1, k2]),
+                4 => {
+                    k.m.call(k.b, k.writes, vec![r1, k2]);
+                    r1
+                }
+                _ => k.m.call(k.b, wave_op, vec![r1, k0]),
+            };
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            let r2 = k.m.load(k.b, p0);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            k.m.store(k.b, p0, side);
+            k.m.call(k.b, k.writes, vec![r1, r2]);
+            k.m.terminate(k.b, Term::Ret);
+
+            let count_barriers = |m: &Module| -> usize {
+                m.blocks[k.b]
+                    .body
+                    .iter()
+                    .filter(|&&id| {
+                        matches!(
+                            &m.insts[id as usize].op,
+                            Op::Call(f, _) if m.funcs[*f as usize].name == "dx.op.barrier"
+                        )
+                    })
+                    .count()
+            };
+            assert_eq!(count_barriers(&k.m), 4);
+            k.m.optimise(ALL);
+            assert_eq!(
+                count_barriers(&k.m),
+                4,
+                "intervening side-effect/lane op kind={kind} must preserve all 4 barriers"
+            );
+            k.m.write();
+        }
+
+        // 6) Negative: WAR hazard across a branch (`W1 -> B1(9) -> R1(lds[0]) -> B2(9) -> R2(lds[1]) -> CondBr`
+        //    into `then` block storing `lds[0]` WITHOUT a barrier) MUST keep `B2(9)`!
+        //    Also verifies cross-block reads (`Br`) and fence-only `barrier(8)` keep barriers.
+        {
+            let mut k = kit();
+            let (i32t, void) = (k.m.int(32), k.m.void());
+            let bty = k.m.func_ty(void, vec![i32t, i32t]);
+            k.m.ptr(bty);
+            let barrier = k.m.function("dx.op.barrier", bty, Some(Attr::NoDuplicate), false);
+            let arr = k.m.array(4, i32t);
+            let lds = k.m.global("lds", arr, 3);
+            let (k0, k1, k8, k9, k80) = (
+                k.m.i32(0),
+                k.m.i32(1),
+                k.m.i32(8),
+                k.m.i32(9),
+                k.m.i32(80),
+            );
+            let v0 = k.m.call(k.b, k.reads, vec![k0, k1]);
+            let cond = k.m.cmp(k.b, pred::EQ, v0, k1);
+            let p0 = k.m.element(k.b, lds, k0);
+            let p1 = k.m.element(k.b, lds, k1);
+
+            // Fence-only mode 8 without thread-group sync bit 1: must keep all three `barrier(8)`.
+            k.m.call(k.b, barrier, vec![k80, k8]);
+            let f1 = k.m.load(k.b, p0);
+            k.m.call(k.b, barrier, vec![k80, k8]);
+            let f2 = k.m.load(k.b, p1);
+            k.m.call(k.b, barrier, vec![k80, k8]);
+
+            // WAR across branch: B2 protects R1(p0) from the un-barriered store to p0 in `then_blk`!
+            k.m.store(k.b, p0, v0);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            let r1 = k.m.load(k.b, p0);
+            k.m.call(k.b, barrier, vec![k80, k9]);
+            let r2 = k.m.load(k.b, p1);
+            let (then_blk, exit_blk) = (k.m.new_block(), k.m.new_block());
+            k.m.terminate(k.b, Term::CondBr(cond, then_blk, exit_blk));
+
+            let sum = k.m.bin(then_blk, Bin::Add, r1, r2);
+            k.m.store(then_blk, p0, sum);
+            k.m.terminate(then_blk, Term::Br(exit_blk));
+
+            let out_f = k.m.bin(exit_blk, Bin::Add, f1, f2);
+            k.m.call(exit_blk, k.writes, vec![out_f, r2]);
+            k.m.terminate(exit_blk, Term::Ret);
+
+            k.m.optimise(ALL);
+            assert_eq!(
+                trace_lds_ops(&k.m, k.b),
+                "BRBRBWBRBR",
+                "fence-only barriers and branch-exiting WAR barrier must stay intact"
+            );
+            k.m.write();
+        }
+    }
+
+    #[test]
     fn ptr_path_aliasing_scalar_aggregate_signed_multidim_and_deep_gep() {
         // 1a-i: Scalar global `V::Global(g)` vs `gep ty, g, 0` MUST canonicalize to the same slot.
         {
@@ -5641,6 +6121,453 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(out_wfa[0], out_wf0[0], "waterfall compute shader parity mismatch");
+        }
+
+        #[test]
+        fn split_lds_wave32_read_after_read_barrier_coalescing_and_parity() {
+            let _one = crate::emit::valu_tests::ONE_AT_A_TIME
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+
+            let dump_lds_pattern = |container: &[u8]| -> Option<String> {
+                let dxc = match std::env::var_os("VICTORY_PC_DXC") {
+                    Some(p) => std::path::PathBuf::from(p),
+                    None => validator::Validator::default_path()?.with_file_name("dxc.exe"),
+                };
+                if !dxc.exists() {
+                    return None;
+                }
+                let file = std::env::temp_dir().join(format!(
+                    "victory-rar-{}-{:?}.dxil",
+                    std::process::id(),
+                    std::thread::current().id()
+                ));
+                std::fs::write(&file, container).ok()?;
+                let out = std::process::Command::new(dxc)
+                    .arg("-dumpbin")
+                    .arg(&file)
+                    .output()
+                    .ok()?;
+                let _ = std::fs::remove_file(&file);
+                assert!(
+                    out.status.success(),
+                    "dxc -dumpbin failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                let text = String::from_utf8_lossy(&out.stdout);
+                Some(
+                    text.lines()
+                        .filter_map(|line| {
+                            let t = line.trim_start();
+                            if t.contains("call void @dx.op.barrier(") {
+                                Some('B')
+                            } else if line.contains("load i32, i32 addrspace(3)*") {
+                                Some('R')
+                            } else if t.starts_with("store i32") && line.contains("addrspace(3)*") {
+                                Some('W')
+                            } else if t.contains("atomicrmw ") && line.contains("addrspace(3)*") {
+                                Some('A')
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                )
+            };
+
+            let lower_split_lds_cs = |body: &[u32], passes: u32| -> HostShader {
+                let mut words = vec![
+                    0xBE85_0380, // s_mov_b32 s5, 0
+                    0x3D << 26 | 0x02 << 18 | 8 << 6 | 2,
+                    125 << 25, // s_load_dwordx4 s[8:11], s[4:5], 0
+                ];
+                words.extend_from_slice(body);
+                words.push(0xBF81_0000); // s_endpgm
+                let native = NativeProgram {
+                    stage: HwStage::Cs,
+                    wave64: true,
+                    vgprs: 16,
+                    layout: vec![
+                        RootParam {
+                            root: RootType::Constants,
+                            table_offset_dwords: 0,
+                            sgprs: 4,
+                            base_register: 0,
+                            user_data: 0,
+                            slot: 0,
+                        },
+                        RootParam {
+                            root: RootType::Table,
+                            table_offset_dwords: 0,
+                            sgprs: 1,
+                            base_register: 0,
+                            user_data: 4,
+                            slot: 1,
+                        },
+                    ],
+                    used: vec![UsedResource {
+                        kind: ResourceType::Uav,
+                        root: RootType::Table,
+                        table_offset_dwords: 0,
+                        lower_bound: 0,
+                        stride: 0,
+                        dwords: 4,
+                        user_data: 4,
+                        slot: 1,
+                    }],
+                    io: StageIo::Cs(ComputeIo {
+                        rsrc2: (5 << 1) | (1 << 15), // 5 user SGPRs + 64 dwords LDS
+                        threads: [64, 1, 1],
+                    }),
+                    code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+                };
+                let lowered = with_shader_opt(passes, || {
+                    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+                    let st = structure::structure(&p).expect("structure");
+                    let res = resource::track(&p, &native.layout, native.stage, Some(&st))
+                        .expect("resource::track");
+                    let io = io::raise(&p, &native).expect("io::raise");
+                    let was = lower::TEST_HOST_WAVE.replace(Some(32));
+                    let res_lower = lower::lower(&lower::Parts {
+                        native: &native,
+                        p: &p,
+                        st: &st,
+                        io: &io,
+                        res: &res,
+                        inputs: Vec::new(),
+                        outputs: Vec::new(),
+                        prims: Vec::new(),
+                        mesh_stride: 0,
+                    });
+                    lower::TEST_HOST_WAVE.set(was);
+                    res_lower.expect("lower split_lds Wave32")
+                });
+                assert_eq!(lowered.wave_size, Some(32), "expected Wave32 split_lds lowering");
+                let shader = HostShader {
+                    stage: HwStage::Cs,
+                    dxil: lowered.dxil,
+                    user_data: lowered.user_data,
+                    samplers: lowered.samplers,
+                    static_samplers: Vec::new(),
+                    root_cbvs: lowered.root_cbvs,
+                    root_srvs: lowered.root_srvs,
+                    root_uavs: lowered.root_uavs,
+                    root_indexed_views: Vec::new(),
+                };
+                validate_dxil(&shader.dxil);
+                shader
+            };
+
+            // 1) Adjacent `write -> read -> read -> overwrite -> read`:
+            //    Thread `t` writes `t`, reads partner `t ^ 32` (`v4`) and own `t` (`v5`),
+            //    overwrites own slot with `v4 + 25`, then reads partner `t + 25` (`v6`).
+            let rar_words: [u32; 20] = [
+                0x3404_0082, // v2 = t * 4
+                0x3A06_00A0, // v3 = t ^ 32
+                0x3406_0682, // v3 = (t ^ 32) * 4
+                0xD834_0000,
+                0x0000_0002, // ds_write_b32 v2, v0
+                0xD8D8_0000,
+                0x0400_0003, // ds_read_b32 v4, v3
+                0xD8D8_0000,
+                0x0500_0002, // ds_read_b32 v5, v2
+                0x4A0E_0899, // v7 = v4 + 25
+                0xD834_0000,
+                0x0000_0702, // ds_write_b32 v2, v7
+                0xD8D8_0000,
+                0x0600_0003, // ds_read_b32 v6, v3
+                0xE070_1000,
+                0x8002_0402, // out[t] = v4
+                0xE070_1100,
+                0x8002_0502, // out[64 + t] = v5
+                0xE070_1200,
+                0x8002_0602, // out[128 + t] = v6
+            ];
+            let mut alu_between_words = rar_words.to_vec();
+            // Move pure VALU `v_mov_b32 v8, 7` between the two `ds_read_b32` instructions.
+            alu_between_words.insert(7, 0x7E10_0287);
+
+            // End-of-shader `write -> read -> read -> UAV stores -> s_endpgm` (3 -> 2 barriers).
+            let rar_end_words: [u32; 13] = [
+                0x3404_0082, // v2 = t * 4
+                0x3A06_00A0, // v3 = t ^ 32
+                0x3406_0682, // v3 = (t ^ 32) * 4
+                0xD834_0000,
+                0x0000_0002, // ds_write_b32 v2, v0
+                0xD8D8_0000,
+                0x0400_0003, // ds_read_b32 v4, v3
+                0xD8D8_0000,
+                0x0500_0002, // ds_read_b32 v5, v2
+                0xE070_1000,
+                0x8002_0402, // out[t] = v4
+                0xE070_1100,
+                0x8002_0502, // out[64 + t] = v5
+            ];
+
+            // Negative 1: `write -> read -> write -> read` (keeps all 4 barriers).
+            let neg_wrwr_words: [u32; 16] = [
+                0x3404_0082, // v2 = t * 4
+                0x3A06_00A0, // v3 = t ^ 32
+                0x3406_0682, // v3 = (t ^ 32) * 4
+                0xD834_0000,
+                0x0000_0002, // ds_write_b32 v2, v0
+                0xD8D8_0000,
+                0x0400_0003, // ds_read_b32 v4, v3
+                0x4A0E_0899, // v7 = v4 + 25
+                0xD834_0000,
+                0x0000_0702, // ds_write_b32 v2, v7
+                0xD8D8_0000,
+                0x0600_0003, // ds_read_b32 v6, v3
+                0xE070_1000,
+                0x8002_0402, // out[t] = v4
+                0xE070_1200,
+                0x8002_0602, // out[128 + t] = v6
+            ];
+
+            // Negative 2: LDS atomic (`ds_add_u32`) between two reads keeps all 4 barriers.
+            let neg_atomic_words: [u32; 16] = [
+                0x3404_0082, // v2 = t * 4
+                0x3A06_00A0, // v3 = t ^ 32
+                0x3406_0682, // v3 = (t ^ 32) * 4
+                0x7E10_0287, // v8 = 7
+                0xD834_0000,
+                0x0000_0002, // ds_write_b32 v2, v0
+                0xD8D8_0000,
+                0x0400_0003, // ds_read_b32 v4, v3
+                0xD800_0000,
+                0x0000_0802, // ds_add_u32 v2, v8
+                0xD8D8_0000,
+                0x0500_0002, // ds_read_b32 v5, v2 (t + 7)
+                0xE070_1000,
+                0x8002_0402, // out[t] = v4
+                0xE070_1100,
+                0x8002_0502, // out[64 + t] = v5
+            ];
+
+            // Negative 3: UAV `buffer_load_dword` call between two reads keeps all 5 barriers.
+            let mut neg_uav_load_words = rar_words.to_vec();
+            neg_uav_load_words.splice(7..7, [0xE030_1000, 0x8002_0802]); // buffer_load_dword v8, v2, s[8:11], 0 offen
+
+            let hw = hw_host();
+            let warp = Host::new(true).ok();
+
+            let check_192 = |out: &[u32], ctx: &str| {
+                for t in 0..64u32 {
+                    let i = t as usize;
+                    assert_eq!(
+                        [out[i], out[64 + i], out[128 + i]],
+                        [t ^ 32, t, t + 25],
+                        "{ctx}, thread {t}"
+                    );
+                }
+            };
+
+            for (label, body, unopt_pat, opt_pat) in [
+                ("adjacent_rar", rar_words.as_slice(), "BWBRBRBWBR", "BWBRRBWBR"),
+                (
+                    "pure_alu_between_reads",
+                    alu_between_words.as_slice(),
+                    "BWBRBRBWBR",
+                    "BWBRRBWBR",
+                ),
+                ("rar_before_ret", rar_end_words.as_slice(), "BWBRBR", "BWBRR"),
+                (
+                    "neg_write_between_reads",
+                    neg_wrwr_words.as_slice(),
+                    "BWBRBWBR",
+                    "BWBRBWBR",
+                ),
+                (
+                    "neg_atomic_between_reads",
+                    neg_atomic_words.as_slice(),
+                    "BWBRBABR",
+                    "BWBRBABR",
+                ),
+                (
+                    "neg_uav_load_between_reads",
+                    neg_uav_load_words.as_slice(),
+                    "BWBRBRBWBR",
+                    "BWBRBRBWBR",
+                ),
+            ] {
+                let s0 = lower_split_lds_cs(body, 0);
+                let sb = lower_split_lds_cs(body, BARRIERS);
+                let sa = lower_split_lds_cs(body, ALL);
+                assert!(
+                    sa.dxil.len() <= s0.dxil.len(),
+                    "{label}: ALL passes should not grow DXIL ({} vs {})",
+                    sa.dxil.len(),
+                    s0.dxil.len()
+                );
+                if let Some(p0) = dump_lds_pattern(&s0.dxil) {
+                    let pb = dump_lds_pattern(&sb.dxil).expect("BARRIERS dump");
+                    let pa = dump_lds_pattern(&sa.dxil).expect("ALL dump");
+                    assert_eq!(p0, unopt_pat, "{label} mask=0 pattern");
+                    assert_eq!(pb, opt_pat, "{label} mask=BARRIERS pattern");
+                    assert_eq!(pa, opt_pat, "{label} mask=ALL pattern");
+                    eprintln!("{label}: opt=0 `{p0}` -> BARRIERS `{pb}`, ALL `{pa}`");
+                }
+                for (host_name, host_opt) in [("hw", hw.as_ref()), ("warp", warp.as_ref())] {
+                    let Some(h) = host_opt else { continue };
+                    let Ok((r0, p0)) = h.compute_pipeline(&s0) else {
+                        // Older Windows 10 WARP refuses explicit `WaveSize(32)`;
+                        // WARP execution is additionally covered below without `WaveSize`.
+                        assert_ne!(
+                            host_name, "hw",
+                            "{label}: hardware Wave32 GPU rejected PSO"
+                        );
+                        continue;
+                    };
+                    let (rb, pb) = h.compute_pipeline(&sb).expect("BARRIERS PSO");
+                    let (ra, pa) = h.compute_pipeline(&sa).expect("ALL PSO");
+                    let run_one = |r: &_, p: &_, sh: &HostShader| -> Vec<u32> {
+                        let ud = vec![0u32; sh.user_data_dwords().max(1) as usize];
+                        h.dispatch(
+                            r,
+                            p,
+                            &Dispatch {
+                                roots: vec![(0, Root::Constants(ud))],
+                                views: &[View::RawUav(192)],
+                                samplers: &[],
+                                groups: [1, 1, 1],
+                            },
+                        )
+                        .expect("dispatch")[0]
+                            .clone()
+                    };
+                    let out0 = run_one(&r0, &p0, &s0);
+                    let outb = run_one(&rb, &pb, &sb);
+                    let outa = run_one(&ra, &pa, &sa);
+                    assert_eq!(outb, out0, "{label} ({host_name}): BARRIERS vs 0 mismatch");
+                    assert_eq!(outa, out0, "{label} ({host_name}): ALL vs 0 mismatch");
+                    if label == "adjacent_rar"
+                        || label == "pure_alu_between_reads"
+                        || label == "neg_uav_load_between_reads"
+                    {
+                        check_192(&outa, &format!("{label} ({host_name})"));
+                    } else if label == "rar_before_ret" {
+                        for t in 0..64u32 {
+                            let i = t as usize;
+                            assert_eq!([outa[i], outa[64 + i]], [t ^ 32, t], "{label} thread {t}");
+                        }
+                    } else if label == "neg_atomic_between_reads" {
+                        for t in 0..64u32 {
+                            let i = t as usize;
+                            assert_eq!(
+                                [outa[i], outa[64 + i]],
+                                [t ^ 32, t + 7],
+                                "{label} thread {t}"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Unconditional WARP execution (wave-width-neutral SM 6.6 `write -> read -> read -> overwrite -> read`,
+            // 5 -> 4 barriers) so even Windows 10 WARP without `WaveSize(32)` executes every lane & dword.
+            let warp = Host::new(true).expect("Microsoft D3D12 WARP adapter required");
+            let build_warp_rar_cs = |passes: u32| -> (HostShader, usize) {
+                let (dxil, barriers_left): (Vec<u8>, usize) = with_shader_opt(passes, || {
+                    let mut s = Shader::new(false);
+                    s.threads = Some([64, 1, 1]);
+                    s.user_data = 1;
+                    s.lds_dwords = 64;
+                    let lds = s.lds();
+                    let (e, i32t, void) = (s.entry, s.t.i32, s.t.void);
+                    let (k0, k2, k4, k9, k25, k32, k64, k128, k80) = (
+                        s.m.i32(0),
+                        s.m.i32(2),
+                        s.m.i32(4),
+                        s.m.i32(9),
+                        s.m.i32(25),
+                        s.m.i32(32),
+                        s.m.i32(64),
+                        s.m.i32(128),
+                        s.m.i32(80),
+                    );
+                    let _ = k80;
+                    let tid = s.op(e, "threadId.i32", Attr::ReadNone, i32t, 93, &[k0]);
+                    let partner = s.m.bin(e, Bin::Xor, tid, k32);
+                    let self_ptr = s.m.element(e, lds, tid);
+                    let peer_ptr = s.m.element(e, lds, partner);
+
+                    s.op(e, "barrier", Attr::NoDuplicate, void, 80, &[k9]);
+                    s.m.store(e, self_ptr, tid);
+                    s.op(e, "barrier", Attr::NoDuplicate, void, 80, &[k9]);
+                    let r_peer = s.m.load(e, peer_ptr);
+                    s.op(e, "barrier", Attr::NoDuplicate, void, 80, &[k9]);
+                    let r_self = s.m.load(e, self_ptr);
+                    let overwritten = s.m.bin(e, Bin::Add, r_peer, k25);
+                    s.op(e, "barrier", Attr::NoDuplicate, void, 80, &[k9]);
+                    s.m.store(e, self_ptr, overwritten);
+                    s.op(e, "barrier", Attr::NoDuplicate, void, 80, &[k9]);
+                    let r_after = s.m.load(e, peer_ptr);
+
+                    let uav = s.heap_handle(e, k0, false, false, (11 | 0x1000, 0));
+                    let undef = s.m.undef(i32t);
+                    let mask1 = s.m.i8(1);
+                    for (base, val) in [(k0, r_peer), (k64, r_self), (k128, r_after)] {
+                        let idx = s.m.bin(e, Bin::Add, tid, base);
+                        let off = s.m.bin(e, Bin::Shl, idx, k2);
+                        s.op(
+                            e,
+                            "rawBufferStore.i32",
+                            Attr::NoUnwind,
+                            void,
+                            140,
+                            &[uav, off, undef, val, undef, undef, undef, mask1, k4],
+                        );
+                    }
+                    s.m.terminate(e, Term::Ret);
+                    let module_passes = passes & MODULE;
+                    if module_passes != 0 {
+                        s.m.optimise(module_passes);
+                    }
+                    let b_idx = crate::emit::census::KINDS
+                        .iter()
+                        .position(|&n| n == "barrier")
+                        .unwrap();
+                    let barriers_left = s.m.census().counts[b_idx] as usize;
+                    let dxil = with_shader_opt(0, || s.finish());
+                    (dxil, barriers_left)
+                });
+                validate_dxil(&dxil);
+                let shader = HostShader {
+                    stage: HwStage::Cs,
+                    dxil,
+                    user_data: Vec::new(),
+                    samplers: Vec::new(),
+                    static_samplers: Vec::new(),
+                    root_cbvs: Vec::new(),
+                    root_srvs: Vec::new(),
+                    root_uavs: Vec::new(),
+                    root_indexed_views: Vec::new(),
+                };
+                (shader, barriers_left)
+            };
+
+            let (w0, b_cnt0) = build_warp_rar_cs(0);
+            let (wb, b_cntb) = build_warp_rar_cs(BARRIERS);
+            let (wa, b_cnta) = build_warp_rar_cs(ALL);
+            assert_eq!(b_cnt0, 5, "unoptimized fixture must have 5 barriers");
+            assert_eq!(b_cntb, 4, "BARRIERS fixture must coalesce 5 -> 4 barriers");
+            assert_eq!(b_cnta, 4, "ALL fixture must coalesce 5 -> 4 barriers");
+            for (lbl, sh) in [("warp_0", &w0), ("warp_BARRIERS", &wb), ("warp_ALL", &wa)] {
+                let (r, p) = warp.compute_pipeline(sh).expect("WARP compute_pipeline");
+                let out = warp
+                    .dispatch(
+                        &r,
+                        &p,
+                        &Dispatch {
+                            roots: vec![(0, Root::Constants(vec![0]))],
+                            views: &[View::RawUav(192)],
+                            samplers: &[],
+                            groups: [1, 1, 1],
+                        },
+                    )
+                    .expect("WARP dispatch");
+                check_192(&out[0], lbl);
+            }
         }
 
         #[test]
