@@ -325,23 +325,22 @@ const AHEAD_MAX: usize = (1 << 30) / PAGE;
 /// submissions refresh thousands of host copies (6,664 askings a frame,
 /// 456 ms, in run 14). Ranges that are not write-watched, or lie alone, are
 /// left to `writes`.
-pub(crate) fn ask_ahead(ranges: &[(usize, usize)]) {
+pub(crate) fn ask_ahead(ranges: impl Iterator<Item = (usize, usize)>) {
+    // The submission's one asking stands. Do not build a second plan;
+    // ranges it does not cover are left to `writes`.
+    if journal().kept {
+        return;
+    }
     let mut pieces: Vec<(usize, usize)> = ranges
-        .iter()
         // Not view memory known by its bits: the kernel would refuse the
         // asking (and, asked together with others, theirs).
         .filter(|r| r.0 < r.1 && !published(r.0, r.1))
-        .map(|&(start, end)| (start / PAGE, end.div_ceil(PAGE)))
+        .map(|(start, end)| (start / PAGE, end.div_ceil(PAGE)))
         .collect();
     if pieces.len() < 2 {
         return;
     }
     pieces.sort_unstable();
-    // The submission's one asking stands ([`ask_once`]): what it does not
-    // hold is left to `writes`.
-    if journal().kept {
-        return;
-    }
     let _all = Asking::hold_all();
     let (mut asked, mut written) = (Vec::new(), Vec::new());
     let mut i = 0;
@@ -545,7 +544,7 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
         return;
     }
     ask_once_end();
-    ask_ahead(ranges);
+    ask_ahead(ranges.iter().copied());
     ask_rest(ranges);
 }
 
@@ -3656,11 +3655,12 @@ mod tests {
         assert_ne!(p, 0);
         // One range: `ask_ahead` leaves it.
         let ranges = [(p, p + 4 * PAGE)];
-        ask_ahead(&ranges);
+        ask_ahead(ranges.into_iter());
         let (copied, _) = writes(p, p + 4 * PAGE, false).expect("watched");
         // SAFETY: committed pages of ours.
         unsafe { ((p + PAGE) as *mut u8).write_volatile(1) };
         ask_rest(&ranges);
+        ask_ahead(std::iter::from_fn(|| panic!("a kept asking must not consume another range plan")));
         let last = journal().written.get(&(p / PAGE + 1)).copied();
         ask_once_end();
         assert!(last.is_some_and(|last| last > copied), "{last:?} is not after {copied}");
