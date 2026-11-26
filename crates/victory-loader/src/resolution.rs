@@ -1,5 +1,6 @@
 //! The title's output size and render scale (`VICTORY_OUTPUT`,
-//! `VICTORY_RENDER_SCALE`, `VICTORY_UPSCALER`; each off without it): places
+//! `VICTORY_RENDER_SCALE`, `VICTORY_FFX_SCALE`, `VICTORY_UPSCALER`; each off
+//! without it): places
 //! in the title's code changed at load, each compared byte for byte first
 //! and left alone, said so, if it differs (another build of the title).
 //!
@@ -27,10 +28,13 @@
 //!   except on Series S with a flag, 7, AMD FidelityFX) gives the render
 //!   size from the output size (+0x7e92f0 → the upscaler's +0x50 method):
 //!   its own (+0x7e9440) multiplies by a scale at +0x90 of it, set to 2/3 at
-//!   +0x28f1e78 (so 2560x1440 for 4K, 1280x720 for 1080p); FidelityFX's
-//!   (+0x28ef680) by 1.0 on Series X, 2/3 on Series S. Both take the
-//!   scale asked for: the first constant replaced, the second's two loads
-//!   pointed at a constant in its padding (as pull request #53 did).
+//!   +0x28f1e78 (so 2560x1440 for 4K, 1280x720 for 1080p);
+//!   `VICTORY_RENDER_SCALE` replaces that constant (Series X; run res-4 at
+//!   1.0). FidelityFX's (+0x28ef680, Series S) multiplies by 1.0 on Series X,
+//!   2/3 on Series S; `VICTORY_FFX_SCALE` points its two loads at a constant
+//!   in its padding (as pull request #53 did). That one is not safe: at 0.5
+//!   on Series S (run res-6) FidelityFX's jitter phase count came back 0 and
+//!   the title divided by it (+0x28f03e8) 49 s in.
 //! - **Upscaler.** `VICTORY_UPSCALER=<kind>` makes the picker return
 //!   `kind` (pull request #53): 6 the title's own, 7 FidelityFX.
 
@@ -57,7 +61,10 @@ pub fn parse_output(spec: &str) -> Option<(u32, u32)> {
 }
 
 /// `VICTORY_RENDER_SCALE=<s>`, 0.5 to 1.0 (0.5: half the output's width and
-/// height). `None` if unset or out of range (said why).
+/// height): the title's own upscaler's scale (Series X; 2/3 without it).
+/// Tested at 1.0 (run res-4); below 2/3 the title's largest render size
+/// (+0x94, max(2/3, scale)) stays at 2/3. `None` if unset or out of range
+/// (said why).
 pub fn asked_render_scale() -> Option<f32> {
     let spec = std::env::var("VICTORY_RENDER_SCALE").ok()?;
     let scale = parse_render_scale(&spec);
@@ -69,6 +76,17 @@ pub fn asked_render_scale() -> Option<f32> {
 
 pub fn parse_render_scale(spec: &str) -> Option<f32> {
     spec.trim().parse::<f32>().ok().filter(|s| (0.5..=1.0).contains(s))
+}
+
+/// `VICTORY_FFX_SCALE=<s>`, 0.5 to 1.0: FidelityFX's render scale (Series
+/// S). Crashed at 0.5 (run res-6); see the module's notes.
+pub fn asked_ffx_scale() -> Option<f32> {
+    let spec = std::env::var("VICTORY_FFX_SCALE").ok()?;
+    let scale = parse_render_scale(&spec);
+    if scale.is_none() {
+        eprintln!("VIctory: VICTORY_FFX_SCALE={spec}: expected 0.5 to 1.0");
+    }
+    scale
 }
 
 /// `VICTORY_UPSCALER=<kind>`: 6 (the title's own) or 7 (FidelityFX).
@@ -288,6 +306,8 @@ pub unsafe fn apply_asked(base: usize, size: usize) {
     }
     if let Some(s) = asked_render_scale() {
         asked.push((&OWN_SCALE, own_scale_code(s), format!("{s}")));
+    }
+    if let Some(s) = asked_ffx_scale() {
         asked.push((&FFX_SCALE, ffx_scale_code(s), format!("{s}")));
     }
     if let Some(kind) = asked_upscaler() {
