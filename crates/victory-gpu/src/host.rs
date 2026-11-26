@@ -3289,6 +3289,14 @@ fn joins_asked() -> (usize, usize) {
     static MOST: OnceLock<(usize, usize)> = OnceLock::new();
     let of = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse::<usize>().ok());
     let (parts, lists) = *MOST.get_or_init(|| (of("VICTORY_JOIN_PARTS").unwrap_or(1).max(1), of("VICTORY_JOIN_LISTS").unwrap_or(48).max(1)));
+    // In the in-run A/B (diagnostics builds), `VICTORY_JOIN_MORE`: four
+    // times the parts (of at least 8) and the lists joined, to see whether
+    // fewer, larger submissions spare the submitting thread its work per
+    // submission (the write watch asked, refreshes in front, steps).
+    #[cfg(feature = "diagnostics")]
+    if crate::ab::pick("VICTORY_JOIN_MORE") == Some(true) {
+        return (parts.max(8) * 4, lists * 4);
+    }
     #[cfg(feature = "diagnostics")]
     if let Some(on) = crate::ab::pick("VICTORY_JOIN_PARTS") {
         return (if on { 8 } else { 1 }, lists);
@@ -3482,6 +3490,51 @@ fn land() {
     for (lists, order) in landed {
         crate::list::recycle(lists, &order);
     }
+}
+
+/// [`land`] at the end of a submission, on a thread of its own with
+/// `VICTORY_LAND_ASIDE=1` (off by default; flips with the in-run A/B in
+/// diagnostics builds): resetting the lists of landed flights is the
+/// host's and the driver's work on their allocators, and nothing the
+/// submission that follows waits for: it takes a list from the idle ones,
+/// or makes one. [`land`] is already called from the thread that settles
+/// flights as well, so it may run beside the submitting thread.
+///
+/// From fxceless/victory-fork pull request 1146 (beamdotdev): a tenth of
+/// the submitting thread's time on a six-thread processor there. In the
+/// house test on an RTX 5080 (run S9, FILL_TITLE=2, BURY_ASIDE=1,
+/// PLACED_ORDER=1, PORT_GUARD=1) the submitting thread, busy ~50 ms of a
+/// ~53 ms frame, spent a share of it here and in the list resets inside.
+fn land_after_submission() {
+    static WANTED: OnceLock<bool> = OnceLock::new();
+    static ASIDE: OnceLock<Option<Mutex<std::sync::mpsc::Sender<()>>>> = OnceLock::new();
+    let wanted = *WANTED.get_or_init(|| std::env::var_os("VICTORY_LAND_ASIDE").is_some_and(|v| v == "1"));
+    #[cfg(feature = "diagnostics")]
+    let wanted = crate::ab::pick("VICTORY_LAND_ASIDE").unwrap_or(wanted);
+    if wanted {
+        let aside = ASIDE.get_or_init(|| {
+            let (send, asked) = std::sync::mpsc::channel::<()>();
+            std::thread::Builder::new()
+                .name("victory-land-aside".to_owned())
+                .spawn(move || {
+                    while asked.recv().is_ok() {
+                        // One landing for all the asks so far.
+                        while asked.try_recv().is_ok() {}
+                        let _landing = crate::timeline::span("landed lists reset and given back");
+                        land();
+                    }
+                })
+                .ok()
+                .map(|_| Mutex::new(send))
+        });
+        if let Some(send) = aside
+            && send.lock().unwrap_or_else(|e| e.into_inner()).send(()).is_ok()
+        {
+            return;
+        }
+    }
+    let _landing = crate::timeline::span("landed lists reset and given back");
+    land();
 }
 
 /// The thread that settles the flights once the card has run them all
@@ -5503,7 +5556,7 @@ impl Host {
         }
         drop(submitted);
         let _landing = crate::timeline::span("landed lists reset and given back");
-        land();
+        land_after_submission();
         AFTER_SEND.fetch_add(after.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
