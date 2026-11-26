@@ -62,6 +62,12 @@ pub(super) struct Placed {
 }
 
 impl Placed {
+    /// Whether the source is taken on the CPU at submission (into the list's
+    /// upload memory), not read out of a host copy by the card.
+    pub(super) fn source_on_cpu(&self) -> bool {
+        self.from.is_some()
+    }
+
     /// Whether flights that write `written` are waited for.
     pub(super) fn waits(&self, written: &[(usize, usize)]) -> Waits {
         let source = touches(written, self.src, self.src + self.len);
