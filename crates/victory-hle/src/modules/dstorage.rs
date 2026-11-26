@@ -621,7 +621,19 @@ fn worker_count() -> usize {
             return n;
         }
         let logical = std::thread::available_parallelism().map_or(4, |n| n.get());
-        physical_cores().unwrap_or_else(|| (logical / 2).max(2)).clamp(1, 32)
+        match physical_cores() {
+            Some(cores) => {
+                tracing::info!(cores, logical, "dstorage: physical cores, from the system");
+                cores.clamp(1, 32)
+            }
+            None => {
+                // The query failed or said nothing useful: halve the logical
+                // count, which is what an SMT machine needs and what every
+                // machine got before this existed.
+                tracing::info!(logical, "dstorage: physical cores unknown, using logical/2");
+                (logical / 2).max(2).clamp(1, 32)
+            }
+        }
     })
 }
 
@@ -656,7 +668,12 @@ fn physical_cores() -> Option<usize> {
     let mut cores = 0usize;
     while at + 8 <= buf.len() {
         // SAFETY: the record's own header; `Size` is its first field.
-        let size = unsafe { std::ptr::read_unaligned(buf.as_ptr().add(at).cast::<u32>()) } as usize;
+        let size = unsafe {
+            std::ptr::read_unaligned(buf.as_ptr().add(at).add(std::mem::offset_of!(
+                SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
+                Size
+            )).cast::<u32>())
+        } as usize;
         if size < 8 || at + size > buf.len() {
             break;
         }
