@@ -20,7 +20,9 @@
 //!   (+0x204/+0x208), then the title's own else-path (screen size set,
 //!   +0xd8c3a0 if the height changed). Everything that reads the settings
 //!   after it (the device parameters +0x1e0fb30, the render size +0x7b4e10)
-//!   sees the same size.
+//!   sees the same size. The back buffers' pool (64 MB on Series X) is
+//!   checked to be used up but for 2 MB (+0x247af25, an `int3`); for another
+//!   size that check is jumped over.
 //! - **Render scale.** The upscaler the title picks (+0x7e93f0: 6, its own,
 //!   except on Series S with a flag, 7, AMD FidelityFX) gives the render
 //!   size from the output size (+0x7e92f0 → the upscaler's +0x50 method):
@@ -112,6 +114,24 @@ pub const OUTPUT: Site = Site {
         0xe8, 0x38, 0x8e, 0xb4, 0xfe, // call +0xd8c3a0
     ],
 };
+
+/// +0x247ad10, after the back buffers are made in their pool (64 MB on
+/// Series X, 82 MB on Series S, from +0x247ad45): `int3` unless less than
+/// 2 MB of the pool is left over. Sized for 3840x2160; at 1920x1080 49 MB
+/// are left (run res-1 stopped here). With another output size the check
+/// becomes a jump over the `int3`; the pool stays as large.
+pub const POOL_CHECK: Site = Site {
+    at: 0x247af25,
+    what: "back buffer pool's left-over check",
+    bytes: &[0x48, 0x3d, 0xff, 0xff, 0x1f, 0x00, 0x76, 0x01, 0xcc], // cmp rax, 1FFFFFh ; jbe +1 ; int3
+};
+
+/// What goes at [`POOL_CHECK`]: `jmp +1` in place of `jbe +1`.
+pub fn pool_check_code() -> Vec<u8> {
+    let mut c = POOL_CHECK.bytes[..8].to_vec();
+    c[6] = 0xeb;
+    c
+}
 
 /// The title's own upscaler, its method +0x28f1e70: `mov dword [rcx+90h],
 /// 2/3` (the scale +0x7e9440 renders at).
@@ -262,6 +282,9 @@ pub unsafe fn apply_asked(base: usize, size: usize) {
     let mut asked: Vec<(&Site, Vec<u8>, String)> = Vec::new();
     if let Some((w, h)) = asked_output() {
         asked.push((&OUTPUT, output_code(w, h), format!("{w}x{h}")));
+        if (w, h) != (3840, 2160) {
+            asked.push((&POOL_CHECK, pool_check_code(), format!("{w}x{h}")));
+        }
     }
     if let Some(s) = asked_render_scale() {
         asked.push((&OWN_SCALE, own_scale_code(s), format!("{s}")));
@@ -359,6 +382,7 @@ mod tests {
         let changed: Vec<usize> = (0..ffx.len()).filter(|&i| ffx[i] != FFX_SCALE.bytes[i]).collect();
         assert!(changed.iter().all(|&i| (0x2c..0x30).contains(&i) || (0x36..0x3a).contains(&i) || (0x64..0x68).contains(&i)));
         assert_eq!(picker_code(7), [0xb8, 7, 0, 0, 0, 0xc3]);
+        assert_eq!(pool_check_code(), [0x48, 0x3d, 0xff, 0xff, 0x1f, 0x00, 0xeb, 0x01]);
     }
 
     #[cfg(windows)]
