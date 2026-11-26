@@ -129,13 +129,48 @@ fn parse(set: &str) -> Set {
 
 fn set() -> Set {
     static SET: OnceLock<Set> = OnceLock::new();
-    *SET.get_or_init(|| parse(&std::env::var("VICTORY_AMBIENT").unwrap_or_default()))
+    *SET.get_or_init(|| match parse(&std::env::var("VICTORY_AMBIENT").unwrap_or_default()) {
+        // With the band asked for and no share, the band's level.
+        Set::Off => rt_band().map_or(Set::Off, |b| Set::Estimate(b.level)),
+        set => set,
+    })
+}
+
+/// With ray tracing (`VICTORY_AMBIENT_RT=<least>,<most>[,<level>]`; unset:
+/// off, the title's own light whenever the builder runs): the diffuse light
+/// the title's resolve leaves is kept between `least` and `most` times the
+/// estimate (level: the share of the estimate when `VICTORY_AMBIENT` is not
+/// set, 0.8). The title's traced light flickers and goes black indoors while
+/// the structures its rays walk are partly wrong (reports/RT-FLICKER.md): its
+/// detail stays inside the band, its swings and black rooms do not.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct Band {
+    least: f32,
+    most: f32,
+    level: f32,
+}
+
+pub(crate) fn rt_band() -> Option<Band> {
+    static SET: OnceLock<Option<Band>> = OnceLock::new();
+    *SET.get_or_init(|| {
+        let band = parse_band(&std::env::var("VICTORY_AMBIENT_RT").ok()?)?;
+        tracing::info!(least = band.least, most = band.most, level = band.level, "the stand-in keeps the traced indirect light in a band (VICTORY_AMBIENT_RT)");
+        Some(band)
+    })
+}
+
+fn parse_band(set: &str) -> Option<Band> {
+    let mut parts = set.split(',').map(|p| p.trim().parse::<f32>().ok().filter(|v| v.is_finite() && *v >= 0.0));
+    let least = parts.next().flatten()?;
+    let most = parts.next().flatten().unwrap_or(4.0).max(least).max(1e-3);
+    let level = parts.next().flatten().filter(|v| *v > 0.0).unwrap_or(0.8);
+    Some(Band { least, most, level })
 }
 
 /// Whether a stand-in is on (for the diffuse light or for reflections):
 /// set, and the title's rays find nothing.
 pub(crate) fn on() -> bool {
-    (set() != Set::Off || specular().is_some()) && !crate::pipeline::builder_runs()
+    (set() != Set::Off || specular().is_some()) && (rt_band().is_some() || !crate::pipeline::builder_runs())
 }
 
 /// `VICTORY_AMBIENT_SPECULAR=<share>[,<sky>]`: reflections whose rays found
@@ -179,6 +214,16 @@ fn specular() -> Option<Specular> {
 fn once() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_AMBIENT_ONCE").is_some_and(|v| v == "1"))
+}
+
+/// The title's leftover light is kept between these multiples of the
+/// estimate: with rays, the band's; without, at least the estimate and at
+/// most four times it.
+fn bounds() -> (f32, f32) {
+    match rt_band() {
+        Some(b) if crate::pipeline::builder_runs() => (b.least, b.most),
+        _ => (1.0, 4.0),
+    }
 }
 
 /// The most the air scatters, as a multiple of the light around
@@ -278,7 +323,7 @@ fn shade() -> [f32; 2] {
 }
 
 const SOURCE: &str = r#"
-#define RS "RootConstants(num32BitConstants=16, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2), UAV(u3)"
+#define RS "RootConstants(num32BitConstants=17, b0), DescriptorTable(SRV(t0)), DescriptorTable(UAV(u0)), UAV(u1), UAV(u2), UAV(u3)"
 #define CX 64
 #define CY 36
 #define CELLS (CX * CY)
@@ -289,6 +334,7 @@ cbuffer Set : register(b0) {
     float near; float tan_y; uint width; uint height;
     float follow; float most; float air; float once;
     float jump; float fresh; float dt; uint probe;
+    float least;
 };
 Texture2D<float> depth : register(t0);
 // Cells: the light they send out (then, at CELLS, the slow mean), from
@@ -553,7 +599,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
     float top = max(dot(found, LUMA) * bound, 1e-6);
     float has = dot(was, LUMA);
     was *= min(1.0, top / max(has, 1e-6));
-    float3 now = max(was, found);
+    float3 now = max(was, found * least);
     float3 written = now;
     light[p] = pack(now);
     if (once > 0.0) {
@@ -804,20 +850,22 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     list.keep(&pass.stats);
     let [strength, radius] = shade();
     let floats = [level, constant, strength, radius, 0.1, 0.45];
-    let mut words = [0u32; 16];
+    let mut words = [0u32; 17];
     for (to, v) in words.iter_mut().zip(floats) {
         *to = v.to_bits();
     }
     words[6] = views.depth_size[0];
     words[7] = views.depth_size[1];
     words[8] = follow(role).to_bits();
-    words[9] = 4.0f32.to_bits();
+    let (least, most) = bounds();
+    words[9] = most.to_bits();
     words[10] = air().to_bits();
     words[11] = if once() { 1.0f32 } else { 0.0 }.to_bits();
     words[12] = settle().map_or(0.0, |s| s.jump).to_bits();
     words[13] = settle().map_or(0.0, |s| s.fresh).to_bits();
     words[14] = (frame_ms(role) / 1000.0).to_bits();
     words[15] = 0; // the light probe (VIctory-7900XTX b4ba4bbb) is not brought over
+    words[16] = least.to_bits();
     let l = &list.list;
     // SAFETY: an open list with the heap of the views set; the title's
     // program has just used both views, so their textures are in the states
@@ -825,7 +873,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     unsafe {
         uav_barrier(l);
         l.SetComputeRootSignature(&pass.root);
-        l.SetComputeRoot32BitConstants(0, 16, words.as_ptr().cast(), 0);
+        l.SetComputeRoot32BitConstants(0, 17, words.as_ptr().cast(), 0);
         l.SetComputeRootDescriptorTable(1, views.depth);
         l.SetComputeRootDescriptorTable(2, views.image);
         l.SetComputeRootUnorderedAccessView(3, pass.cells.GetGPUVirtualAddress());
@@ -885,6 +933,17 @@ mod tests {
         assert_eq!(parse_specular("0.6, 0.25"), Some(Specular { share: 0.6, sky: 0.25 }));
         assert_eq!(parse_specular("0.6,7"), Some(Specular { share: 0.6, sky: 1.0 }));
         assert_eq!(parse_specular("0.6,x"), Some(Specular { share: 0.6, sky: 0.0 }));
+    }
+
+    #[test]
+    fn the_band_with_rays() {
+        assert_eq!(parse_band("0.5,1.5"), Some(Band { least: 0.5, most: 1.5, level: 0.8 }));
+        assert_eq!(parse_band("1,1,0.6"), Some(Band { least: 1.0, most: 1.0, level: 0.6 }));
+        // The top is never under the floor; a missing top is four times.
+        assert_eq!(parse_band("2,1"), Some(Band { least: 2.0, most: 2.0, level: 0.8 }));
+        assert_eq!(parse_band("0.7"), Some(Band { least: 0.7, most: 4.0, level: 0.8 }));
+        assert_eq!(parse_band(""), None);
+        assert_eq!(parse_band("x,1"), None);
     }
 
     #[test]
