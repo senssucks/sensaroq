@@ -2944,6 +2944,26 @@ mod stale_tests {
     }
 }
 
+/// For the process memory line, in every build: the copies in the card's
+/// memory alive and their bytes, and of them those whose shader writes were
+/// ever declared (which have hashes of their pieces, `Card::before`) and
+/// their bytes. Only those need their PC side to tell shaders' writes from
+/// the title's; the others' PC side is a copy of title memory and nothing
+/// else.
+pub(crate) fn card_room() -> [u64; 4] {
+    let carded = CARDED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out = [0u64; 4];
+    for s in carded.iter().filter_map(std::sync::Weak::upgrade) {
+        let Some(card) = &s.card else { continue };
+        let written = card.before.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        out[0] += 1;
+        out[1] += card.size;
+        out[2] += u64::from(written);
+        out[3] += if written { card.size } else { 0 };
+    }
+    out
+}
+
 /// For the process memory line, in every build: the windows alive, their
 /// bytes, the bytes between the lowest and the highest address ever asked
 /// for in each (what a finer grid, `VICTORY_WINDOW_KB`, could hold them

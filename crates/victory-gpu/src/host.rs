@@ -9768,6 +9768,13 @@ impl Meter {
                             lists[1],
                             lists[3]
                         );
+                        let [cards, card_bytes, written, written_bytes] = crate::shadow::card_room();
+                        tracing::info!(
+                            "copies in the card's memory: {cards} with {} MB; of them {written} with {} MB that shaders were declared \
+                             to write (the others' PC side only mirrors title memory)",
+                            card_bytes >> 20,
+                            written_bytes >> 20
+                        );
                         let [n, bytes, asked, carded] = crate::shadow::window_room();
                         let [card, before] = [0, 1].map(|i| crate::shadow::CARD_BYTES[i].load(Ordering::Relaxed));
                         tracing::info!(
