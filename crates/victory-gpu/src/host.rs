@@ -8094,6 +8094,18 @@ static SPLIT: [std::sync::atomic::AtomicU64; 16] = [const { std::sync::atomic::A
 /// those known to copy nothing, and those done on several threads.
 static FLUSHES: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
+/// Since the last frame-rate line, nanoseconds of all threads in refreshes:
+/// asking whether a copy has anything new, and bringing copies up to date.
+static REFRESH_WORK: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+/// `shadow.nothing_new`, its time counted in [`REFRESH_WORK`].
+fn nothing_new_timed(shadow: &crate::shadow::Shadow, from: usize, len: usize) -> bool {
+    let started = std::time::Instant::now();
+    let same = shadow.nothing_new(from, len);
+    REFRESH_WORK[0].fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    same
+}
+
 /// Since the last frame-rate line, nanoseconds of the submitting thread
 /// around its submissions ([`Host::send_late`]): after one is sent, its
 /// flight noted in the line, what settled meanwhile and the landed lists
@@ -8155,6 +8167,7 @@ fn submit_split_line(frames: f64) {
     let after = AFTER_SEND.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
     let all: f64 = [0, 1, 2, 3, 4, 5, 11, 12, 13, 14, 15].iter().map(|&i| ms[i]).sum();
     let waited = crate::pipeline::take_waited();
+    let work = [0, 1].map(|i| REFRESH_WORK[i].swap(0, Ordering::Relaxed) as f64 / 1e6 / frames);
     if all + after <= 0.0 {
         return;
     }
@@ -8166,7 +8179,8 @@ fn submit_split_line(frames: f64) {
          in the card's memory, {:.1} sending the lists (VICTORY_LIGHT_REFRESH is {}); ahead of these {:.1} waiting for the \
          submission lock, {:.1} planning steps done on the card, {:.1} waiting for flights, {:.1} the heaps' records and what is \
          swept; at the end {:.1} waiting for the heaps' records; after the sending {after:.1} (the flight noted, landed lists \
-         reset and given back); waiting for pipelines being made, all threads: {:.1} (passes over the screen {:.1})",
+         reset and given back); waiting for pipelines being made, all threads: {:.1} (passes over the screen {:.1}); \
+         the refreshes' work, all threads: {:.1} asking whether a copy has anything new, {:.1} bringing copies up to date",
         ms[0],
         ms[8],
         ms[1],
@@ -8190,6 +8204,8 @@ fn submit_split_line(frames: f64) {
         ms[15],
         waited[0] as f64 / 1e6 / frames,
         waited[1] as f64 / 1e6 / frames,
+        work[0],
+        work[1],
     );
     let [first, again] = [0, 1].map(|i| HEAP_SYNC_FIRST[i].swap(0, Ordering::Relaxed) as f64 / frames);
     if first + again > 0.0 {
@@ -8679,6 +8695,7 @@ impl Batch {
         let started = std::time::Instant::now();
         let _one = crate::timeline::span("a copy's refresh");
         let copied = shadow.update(from, to - from);
+        REFRESH_WORK[1].fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let us = started.elapsed().as_micros() as u64;
         #[cfg(feature = "diagnostics")]
         crate::copystat::range(from, to - from, us, 0);
@@ -8750,7 +8767,7 @@ impl Batch {
         let many = spans.len() > FEW;
         if !many {
             let all = spans.len();
-            spans.retain(|(shadow, from, to)| !shadow.nothing_new(*from, *to - *from));
+            spans.retain(|(shadow, from, to)| !nothing_new_timed(shadow, *from, *to - *from));
             FLUSHES[2].fetch_add((all - spans.len()) as u64, Ordering::Relaxed);
         }
         let ahead = spans.len() > 1;
@@ -8766,7 +8783,7 @@ impl Batch {
                 return;
             };
             let (shadow, from, to) = &spans[i];
-            if many && shadow.nothing_new(*from, *to - *from) {
+            if many && nothing_new_timed(shadow, *from, *to - *from) {
                 FLUSHES[2].fetch_add(1, Ordering::Relaxed);
                 return;
             }
@@ -8893,7 +8910,7 @@ impl Batch {
         if light && self.refreshes.len() <= FEW {
             let started = std::time::Instant::now();
             let all = self.refreshes.len();
-            self.refreshes.retain(|(shadow, from, to)| !shadow.nothing_new(*from, *to - *from));
+            self.refreshes.retain(|(shadow, from, to)| !nothing_new_timed(shadow, *from, *to - *from));
             PREPARING[0].fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
             FLUSHES[2].fetch_add((all - self.refreshes.len()) as u64, Ordering::Relaxed);
         }
@@ -8922,7 +8939,7 @@ impl Batch {
                 let refreshes = std::mem::take(&mut self.refreshes);
                 crate::shadow::wide_each(refreshes.len(), move |i| {
                     let (shadow, from, to) = &refreshes[i];
-                    if refreshes.len() > FEW && shadow.nothing_new(*from, *to - *from) {
+                    if refreshes.len() > FEW && nothing_new_timed(shadow, *from, *to - *from) {
                         FLUSHES[2].fetch_add(1, Ordering::Relaxed);
                         return;
                     }
