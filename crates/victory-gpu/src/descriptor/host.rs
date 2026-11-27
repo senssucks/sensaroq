@@ -111,96 +111,6 @@ impl Made {
     }
 }
 
-/// Which dynamic slots of a view heap are taken, a bit each, and where the
-/// search for free ones starts (HumanlyDev/HUMAN PR #18: 64 slots a step
-/// where a `Vec<bool>` looked at one).
-pub(crate) struct DynamicSlots {
-    cursor: u32,
-    len: u32,
-    words: Vec<u64>,
-}
-
-impl DynamicSlots {
-    pub(crate) fn new(len: u32) -> Self {
-        Self { cursor: 0, len, words: vec![0; len.div_ceil(64) as usize] }
-    }
-
-    /// Whether slot `at` is taken (`None` past the end; read by diagnostics).
-    #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
-    fn get(&self, at: u32) -> Option<bool> {
-        (at < self.len).then(|| self.words[(at / 64) as usize] >> (at % 64) & 1 != 0)
-    }
-
-    /// The first of `n` free slots in a row within `[from, to)`.
-    fn scan_range(&self, from: u32, to: u32, n: u32) -> Option<u32> {
-        let mut at = from;
-        let mut run = 0u32;
-        while at < to {
-            let wi = (at / 64) as usize;
-            let bi = at % 64;
-            let avail = (64 - bi).min(to - at);
-            let w = self.words[wi] >> bi;
-            if bi == 0 && avail == 64 && w == !0u64 {
-                run = 0;
-                at += 64;
-                continue;
-            }
-            let free_prefix = w.trailing_zeros().min(avail);
-            run += free_prefix;
-            if run >= n {
-                return Some(at + free_prefix - run);
-            }
-            at += free_prefix;
-            if free_prefix == avail {
-                continue;
-            }
-            run = 0;
-            let w2 = self.words[wi] >> (at % 64);
-            at += w2.trailing_ones().min(to - at);
-        }
-        None
-    }
-
-    /// Takes `n` free slots in a row, searched from the cursor on and then
-    /// from the start: the first's index.
-    pub(crate) fn alloc(&mut self, n: u32) -> Option<u32> {
-        if n == 0 || n > self.len {
-            return None;
-        }
-        let second_end = self.cursor.saturating_add(n - 1).min(self.len);
-        let first = self.scan_range(self.cursor, self.len, n).or_else(|| self.scan_range(0, second_end, n))?;
-        self.mark(first, first + n, true);
-        self.cursor = (first + n) % self.len;
-        Some(first)
-    }
-
-    /// Sets `[at, end)` taken or free: how many were taken before.
-    fn mark(&mut self, at: u32, end: u32, taken: bool) -> u32 {
-        let mut cur = at.min(self.len);
-        let end = end.min(self.len);
-        let mut was = 0u32;
-        while cur < end {
-            let wi = (cur / 64) as usize;
-            let bi = cur % 64;
-            let k = (64 - bi).min(end - cur);
-            let mask = if k == 64 { !0u64 } else { ((1u64 << k) - 1) << bi };
-            was += (self.words[wi] & mask).count_ones();
-            if taken {
-                self.words[wi] |= mask;
-            } else {
-                self.words[wi] &= !mask;
-            }
-            cur += k;
-        }
-        was
-    }
-
-    /// Gives back `[at, end)`: how many of them were taken.
-    pub(crate) fn free_range(&mut self, at: u32, end: u32) -> u32 {
-        self.mark(at, end, false)
-    }
-}
-
 pub(crate) struct HostHeap {
     pub(crate) buffer_sweep: Mutex<crate::draw::BufferSweep>,
     pub(crate) buffer_frame: std::sync::atomic::AtomicU64,
@@ -249,7 +159,7 @@ pub(crate) struct HostHeap {
     kept: Box<[Mutex<Option<ID3D12Resource>>]>,
     /// Where the search for free dynamic slots starts, and which are taken
     /// (by lists not yet reset).
-    next: Mutex<DynamicSlots>,
+    next: Mutex<(u32, Vec<bool>)>,
     /// How many dynamic slots are free (changed under `next`'s lock): with
     /// fewer than a table needs, the search is not made. Once the world
     /// had taken them all, every later table of the frame searched every
@@ -1768,7 +1678,7 @@ pub(crate) fn slot_story(slot: u32) -> String {
         let mut text = if index < host.count {
             format!("title slot {index}, made from {}", host.describe_slot(index).unwrap_or_default())
         } else {
-            let taken = host.next.lock().unwrap_or_else(|e| e.into_inner()).get(index - host.count);
+            let taken = host.next.lock().unwrap_or_else(|e| e.into_inner()).1.get((index - host.count) as usize).copied();
             format!("dynamic slot {} (taken {taken:?})", index - host.count)
         };
         if twin {
@@ -2061,7 +1971,7 @@ impl HostHeap {
             waiting: Mutex::default(),
             away: Mutex::default(),
             kept: (0..count + extra).map(|_| Mutex::new(None)).collect(),
-            next: Mutex::new(DynamicSlots::new(extra)),
+            next: Mutex::new((0, vec![false; extra as usize])),
             free: std::sync::atomic::AtomicU32::new(extra),
             too_long: std::sync::atomic::AtomicU32::new(u32::MAX),
             strides,
@@ -2240,14 +2150,34 @@ impl HostHeap {
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::DynamicAsked, 1);
         let mut guard = self.next.lock().unwrap_or_else(|e| e.into_inner());
+        let (next, taken) = &mut *guard;
         let enough = self.free.load(std::sync::atomic::Ordering::Relaxed) >= n
             && n < self.too_long.load(std::sync::atomic::Ordering::Relaxed);
-        // Searched from the cursor on, then from the start (past the cursor
-        // by n - 1, so runs across it are found); a run does not wrap.
-        let found = if enough { guard.alloc(n) } else { None };
+        let n = n as usize;
+        // Search from `next` on, then from the start (extending past cursor by
+        // n - 1 so contiguous runs crossing the cursor are not missed).
+        let cursor = *next as usize;
+        let end = self.dynamic as usize;
+        let second_end = cursor.saturating_add(n.saturating_sub(1)).min(end);
+        let starts = (cursor..end).chain(0..second_end);
+        let mut run = 0;
+        let mut found = None;
+        let mut last = usize::MAX;
+        for at in starts.take(if enough { usize::MAX } else { 0 }) {
+            // A run cannot wrap past the end.
+            if at != last.wrapping_add(1) {
+                run = 0;
+            }
+            last = at;
+            run = if taken[at] { 0 } else { run + 1 };
+            if run == n {
+                found = Some(at + 1 - n);
+                break;
+            }
+        }
         let Some(first) = found else {
             if enough {
-                self.too_long.fetch_min(n, std::sync::atomic::Ordering::Relaxed);
+                self.too_long.fetch_min(n as u32, std::sync::atomic::Ordering::Relaxed);
             }
             static ONCE: std::sync::Once = std::sync::Once::new();
             ONCE.call_once(|| tracing::warn!(n, "no free dynamic descriptor slots: a table is not made"));
@@ -2261,8 +2191,10 @@ impl HostHeap {
         };
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::DynamicNs, started.elapsed().as_nanos() as u64);
-        self.free.fetch_sub(n, std::sync::atomic::Ordering::Relaxed);
-        Some(self.count + first)
+        taken[first..first + n].fill(true);
+        self.free.fetch_sub(n as u32, std::sync::atomic::Ordering::Relaxed);
+        *next = ((first + n) % end) as u32;
+        Some(self.count + first as u32)
     }
 
     /// The title slots this heap has host slots for; fewer than the title's
@@ -3397,11 +3329,12 @@ impl HostHeap {
             return;
         };
         let mut guard = self.next.lock().unwrap_or_else(|e| e.into_inner());
-        let end = at.saturating_add(n).min(self.dynamic);
-        if at <= end {
-            let given = guard.free_range(at, end);
+        let end = (at + n).min(self.dynamic) as usize;
+        if let Some(slots) = guard.1.get_mut(at as usize..end) {
+            let given = slots.iter().filter(|taken| **taken).count() as u32;
             self.free.fetch_add(given, std::sync::atomic::Ordering::Relaxed);
             self.too_long.store(u32::MAX, std::sync::atomic::Ordering::Relaxed);
+            slots.fill(false);
         }
     }
 
@@ -4843,18 +4776,6 @@ fn make_twinned(
         }
         View::Shader(resource, desc) => {
             let resource = *resource as crate::object::This;
-            // A view the title placed over a texture the host writes, in a
-            // format a view of that texture can have: the texture itself
-            // (`crate::resource::cast_source`), not a copy of it.
-            if let (Some((_, source)), Some(d)) = (crate::resource::cast_source(resource), desc.as_ref()) {
-                let mut view = srv_desc(d);
-                view.Format = DXGI_FORMAT(67);
-                // SAFETY: a live texture made castable to that format, and a
-                // slot of our heap.
-                unsafe { device.CreateShaderResourceView(&source, Some(&view), at) };
-                return Some(Some(source));
-            }
-            crate::resource::shown_uncast(resource);
             if let Some(copy) = crate::resource::host_copy(resource) {
                 let texture = &copy.texture;
                 // The title's views of textures with a stencil plane, as it

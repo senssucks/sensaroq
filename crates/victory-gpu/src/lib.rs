@@ -69,8 +69,6 @@ mod popwatch;
 mod primitive;
 pub mod query;
 pub mod queue;
-#[cfg(windows)]
-mod quiet;
 #[cfg(all(windows, feature = "diagnostics"))]
 pub mod replay;
 #[cfg(windows)]
@@ -79,7 +77,6 @@ pub mod resource;
 pub mod root;
 #[cfg(windows)]
 mod safecopy;
-mod census;
 #[cfg(windows)]
 mod sampler;
 #[cfg(windows)]
@@ -131,7 +128,6 @@ pub fn frames_begun() -> u64 {
     frame::current()
 }
 #[cfg(windows)]
-pub use census::title_memory_reserved;
 pub use inplace::{title_memory_freeing, title_memory_section, title_memory_section_gone, title_memory_view};
 #[cfg(windows)]
 pub use shadow::title_memory_write_combined;
