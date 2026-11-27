@@ -4501,6 +4501,64 @@ fn hand_back(back: &[Declared]) {
     }
 }
 
+/// The nonempty Execute ranges inside one existing submission part. Opening
+/// timestamp lists must finish before producer work can start; the checker must
+/// likewise follow every producer. Neither split needs another fence or wait.
+fn submission_ranges(
+    from: usize,
+    to: usize,
+    opening: usize,
+    checker: Option<usize>,
+) -> impl Iterator<Item = (usize, usize)> {
+    let opening = opening.clamp(from, to);
+    let checker = checker.unwrap_or(to).clamp(opening, to);
+    [(from, opening), (opening, checker), (checker, to)]
+        .into_iter()
+        .filter(|&(a, b)| a < b)
+}
+
+#[cfg(test)]
+mod submission_range_tests {
+    use super::submission_ranges;
+
+    #[test]
+    fn no_opening_stamp_preserves_producer_and_checker() {
+        assert_eq!(submission_ranges(0, 5, 0, None).collect::<Vec<_>>(), [(0, 5)]);
+        assert_eq!(submission_ranges(0, 5, 0, Some(3)).collect::<Vec<_>>(), [(0, 3), (3, 5)]);
+        assert!(submission_ranges(0, 0, 0, None).next().is_none());
+    }
+
+    #[test]
+    fn one_or_two_opening_stamps_finish_before_producers() {
+        for opening in 1..=2 {
+            assert_eq!(
+                submission_ranges(0, 8, opening, Some(6)).collect::<Vec<_>>(),
+                [(0, opening), (opening, 6), (6, 8)],
+            );
+            assert_eq!(
+                submission_ranges(0, 8, opening, None).collect::<Vec<_>>(),
+                [(0, opening), (opening, 8)],
+            );
+        }
+    }
+
+    #[test]
+    fn existing_parts_and_checker_boundaries_are_kept() {
+        let parts = [(0, 0), (0, 4), (4, 7), (7, 11), (11, 12)];
+        let calls: Vec<_> = parts.into_iter().flat_map(|(a, b)| submission_ranges(a, b, 2, Some(9))).collect();
+        assert_eq!(calls, [(0, 2), (2, 4), (4, 7), (7, 9), (9, 11), (11, 12)]);
+        assert_eq!(calls.into_iter().flat_map(|(a, b)| a..b).collect::<Vec<_>>(), (0..12).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn serial_timing_groups_keep_prefix_once_and_never_resubmit_it() {
+        let groups = [(0, 5), (5, 10)];
+        let calls: Vec<_> = groups.into_iter().flat_map(|(a, b)| submission_ranges(a, b, 2, Some(8))).collect();
+        assert_eq!(calls, [(0, 2), (2, 5), (5, 8), (8, 10)]);
+        assert_eq!(submission_ranges(2, 8, 2, Some(8)).collect::<Vec<_>>(), [(2, 8)]);
+    }
+}
+
 impl Host {
     /// Whether the host runs mesh shaders at shader model 6.6 (translated
     /// mesh shaders need both); logged once.
@@ -6435,6 +6493,10 @@ impl Host {
         stage.next("submit: sending");
         // When it runs on the card, for the timeline.
         #[cfg(feature = "diagnostics")]
+        let mut opening_stamps = 0;
+        #[cfg(not(feature = "diagnostics"))]
+        let opening_stamps = 0;
+        #[cfg(feature = "diagnostics")]
         let stamp = stamps::take();
         #[cfg(feature = "diagnostics")]
         if let Some((ahead, behind)) = stamp.and_then(stamps::lists) {
@@ -6442,6 +6504,7 @@ impl Host {
             lists.push(Some(behind));
             firsts.iter_mut().for_each(|first| *first += 1);
             checker_at.iter_mut().for_each(|at| *at += 1);
+            opening_stamps += 1;
         }
         #[cfg(feature = "diagnostics")]
         let sending = crate::timeline::ticks();
@@ -6453,6 +6516,7 @@ impl Host {
                 lists.push(Some(behind));
                 firsts.iter_mut().for_each(|first| *first += 1);
                 checker_at.iter_mut().for_each(|at| *at += 1);
+                opening_stamps += 1;
             }
             let cuts: Vec<usize> = parts.iter().filter_map(|&n| firsts.get(n).copied()).collect();
             // SAFETY: closed lists; the fence is ours.
@@ -6464,9 +6528,9 @@ impl Host {
                 // A checker appended to the producer Execute call can overlap
                 // it. A separate call orders COPY and UAV writers and permits
                 // buffer decay/promotion before the checker reads their bytes.
-                for to in cuts.into_iter().chain(checker_at).chain([lists.len()]) {
-                    if from < to {
-                        self.queue.ExecuteCommandLists(&lists[from..to]);
+                for to in cuts.into_iter().chain([lists.len()]) {
+                    for (a, b) in submission_ranges(from, to, opening_stamps, checker_at) {
+                        self.queue.ExecuteCommandLists(&lists[a..b]);
                     }
                     from = to;
                 }
@@ -6509,7 +6573,10 @@ impl Host {
             firsts
                 .iter()
                 .zip(firsts.iter().skip(1).chain([&lists.len()]))
-                .map(|(&a, &b)| (a, b))
+                .enumerate()
+                // Opening diagnostic lists precede the first run. Keep them
+                // in its group, then split their Execute call below.
+                .map(|(i, (&a, &b))| (if i == 0 { 0 } else { a }, b))
                 .collect()
         } else {
             vec![(0, lists.len())]
@@ -6527,11 +6594,8 @@ impl Host {
             let started = std::time::Instant::now();
             // SAFETY: closed lists; the fence and event are ours.
             unsafe {
-                if let Some(at) = checker_at.filter(|&at| from < at && at < to) {
-                    self.queue.ExecuteCommandLists(&lists[from..at]);
-                    self.queue.ExecuteCommandLists(&lists[at..to]);
-                } else if from < to {
-                    self.queue.ExecuteCommandLists(&lists[from..to]);
+                for (a, b) in submission_ranges(from, to, opening_stamps, checker_at) {
+                    self.queue.ExecuteCommandLists(&lists[a..b]);
                 }
                 self.card_sent();
                 let waited = self
