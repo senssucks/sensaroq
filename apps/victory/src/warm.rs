@@ -139,6 +139,12 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     Ok(())
 }
 
+/// Seconds as "1m 05s" (or "42s").
+fn min_sec(seconds: f64) -> String {
+    let s = seconds.max(0.0).round() as u64;
+    if s >= 60 { format!("{}m {:02}s", s / 60, s % 60) } else { format!("{s}s") }
+}
+
 /// A line with a bar of how far it is, written over itself.
 fn bar(count: usize, all: usize, began: Instant, until: Option<Instant>) {
     const WIDE: usize = 30;
@@ -150,13 +156,13 @@ fn bar(count: usize, all: usize, began: Instant, until: Option<Instant>) {
     let filled = ((done * WIDE as f64) as usize).min(WIDE);
     let spent = began.elapsed().as_secs_f64();
     let left = if count > 0 { spent / count as f64 * (all - count) as f64 } else { 0.0 };
-    let cap = until.map_or(String::new(), |t| format!(", stops in {:.0} s", t.saturating_duration_since(Instant::now()).as_secs_f64()));
+    let cap = until.map_or(String::new(), |t| format!(", stops in {}", min_sec(t.saturating_duration_since(Instant::now()).as_secs_f64())));
     print!(
-        "\rbuilding shaders [{}{}] {:>3.0}%  {count}/{all}  about {:.0} s left{cap}    ",
+        "\rbuilding shaders [{}{}] {:>3.0}%  {count}/{all}  about {} left{cap}    ",
         "#".repeat(filled),
         ".".repeat(WIDE - filled),
         done * 100.0,
-        left
+        min_sec(left)
     );
     let _ = std::io::stdout().flush();
 }

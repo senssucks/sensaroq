@@ -20,7 +20,7 @@ param(
     [switch]$SeriesS,
     # Before the game opens: the shaders the last run drew with are built, those of the place it was left in first,
     # with a bar, for at most this many minutes (0: not). After an update that changes shaders this fills the cache.
-    [double]$WarmMinutes = 1.5,
+    [double]$WarmMinutes = 2.5,
     # 1440: output and scene 2560x1440 (Series X, the image is patched); 1080to1440: scene 1920x1080 upscaled by
     # the title; 4k: the stock Series X output (3840x2160).
     [ValidateSet('1440', '1080to1440', '4k')][string]$Res = '1440',
