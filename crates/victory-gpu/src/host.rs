@@ -9117,9 +9117,14 @@ pub(crate) fn read_there(src: *const u8, dst: &mut [u8]) -> usize {
     if runs.is_empty() {
         runs.push((start, len));
     }
-    // Every byte of a run is read or zeroed below: only the rest is zeroed
-    // here, not the whole buffer first (one write over all of it less).
-    zero_between(dst, start, &runs);
+    // Every byte of a run is read or zeroed below: with
+    // `VICTORY_ZERO_BETWEEN=1` (cool_fox PR #47; off by default) only the rest
+    // is zeroed here, not the whole buffer first (one write over all of it less).
+    if crate::asked_for!("VICTORY_ZERO_BETWEEN") {
+        zero_between(dst, start, &runs);
+    } else {
+        dst.fill(0);
+    }
     for (at, n) in runs {
         let piece = &mut dst[at - start..at - start + n];
         if read_into(at as *const u8, piece) {

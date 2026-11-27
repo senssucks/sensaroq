@@ -1619,14 +1619,17 @@ const CAST_READ: u32 = 67;
 /// Whether textures the host writes as [`CAST_WRITTEN`] are made so that a
 /// view of [`CAST_READ`] can show them as they are (relaxed format casting),
 /// and views the title places over them in that format show the texture
-/// itself instead of a copy of it (`VICTORY_ALIAS_CAST`, on where the
-/// device can; `0`: copies, as before).
+/// itself instead of a copy of it (`VICTORY_ALIAS_CAST=1`, where the
+/// device can; unset: copies, as before).
 #[cfg(windows)]
 pub(crate) fn cast_on() -> bool {
     use windows::Win32::Graphics::Direct3D12::*;
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        if std::env::var_os("VICTORY_ALIAS_CAST").is_some_and(|v| v == "0") {
+        // Off unless `VICTORY_ALIAS_CAST=1`: measured on RDNA4 only; on the
+        // RTX 5060 Ti the first session with it on showed a picture all but
+        // black (the scene's light is in these textures).
+        if std::env::var_os("VICTORY_ALIAS_CAST").is_none_or(|v| v != "1") {
             return false;
         }
         let Some(host) = crate::host::host() else { return false };

@@ -641,6 +641,9 @@ impl Layout {
         row_pitch: usize,
         depth_pitch: usize,
     ) -> Result<(), Error> {
+        if !crate::detile::fast() {
+            return self.walk::<true>(tiled, linear, mip, slice, row_pitch, depth_pitch);
+        }
         crate::detile::detile(self, tiled, mip, slice, linear, row_pitch, depth_pitch)
     }
 
@@ -654,13 +657,15 @@ impl Layout {
         row_pitch: usize,
         depth_pitch: usize,
     ) -> Result<(), Error> {
+        if !crate::detile::fast() {
+            return self.walk::<false>(linear, tiled, mip, slice, row_pitch, depth_pitch);
+        }
         crate::detile::tile(self, tiled, mip, slice, linear, row_pitch, depth_pitch)
     }
 
     /// Copies contiguous runs in one direction between the two layouts.
     #[allow(clippy::too_many_arguments)]
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn walk<const DETILE: bool>(
+        fn walk<const DETILE: bool>(
         &self,
         src: &[u8],
         dst: &mut [u8],
@@ -768,7 +773,6 @@ impl Layout {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn copy_run<const DETILE: bool>(
     src: &[u8],
     dst: &mut [u8],
@@ -787,7 +791,6 @@ fn copy_run<const DETILE: bool>(
 /// A row of equal runs is contiguous in linear memory. Treat it as a
 /// slice of arrays so only the tiled chunk needs a bounds check per copy.
 /// Use the byte ranges for irregular runs and the last run of each row.
-#[cfg_attr(not(test), allow(dead_code))]
 fn copy_runs<const N: usize, const DETILE: bool>(
     src: &[u8],
     dst: &mut [u8],

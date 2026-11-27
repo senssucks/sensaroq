@@ -99,6 +99,13 @@ pub(crate) fn lower(parts: &Parts) -> Result<Lowered, ShaderError> {
 /// and store). Not where a group barrier would wait for lanes that left, nor
 /// where two host waves of 32 stand for a console wave (they exchange, which
 /// takes all lanes).
+/// Whether `v_fract_f32` of an infinity or NaN gives NaN as on the console
+/// (`VICTORY_FRACT_NAN=1`; off by default, as before).
+fn fract_nan() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_FRACT_NAN").is_some_and(|v| v == "1"))
+}
+
 /// `VICTORY_NAN_SCRUB=1` (off by default; from rorodev6/victory-nvidia-megafork
 /// 77e13a97): see `Lower::scrub_nan`.
 pub(crate) fn nan_scrub() -> bool {
@@ -4206,7 +4213,11 @@ impl<'a> Lower<'a> {
         // The console's fraction of an infinity (or of NaN) is NaN; NVIDIA's
         // Frc of an infinity is not (the idea of XCL pull request #68,
         // written anew here: XCL's code is GPL-2.0-only). |a| >= inf,
-        // unordered: true for NaN too.
+        // unordered: true for NaN too. Only with `VICTORY_FRACT_NAN=1` (off
+        // by default: a suspect for a blown-out picture on an RTX 5060 Ti).
+        if !fract_nan() {
+            return r;
+        }
         let size = self.unary(6, a);
         let inf = self.s.m.f32(0x7f80_0000);
         let bad = self.s.m.cmp(c, pred::UGE, size, inf);
