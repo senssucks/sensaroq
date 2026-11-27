@@ -116,6 +116,17 @@ struct Last {
 /// and after the hash found a change the guard did not see.
 const HOT_FRAMES: u64 = 64;
 
+/// Frames between reads of a partly mapped texture (one still streaming in):
+/// `VICTORY_PARTIAL_FRAMES`, 30 by default, at least 1. A mip that streams
+/// in shows up to this many frames late: at 10 fps the default is 3 s of the
+/// low-detail mip, so a lower number shortens pop-in for more CPU reading.
+fn partial_frames() -> u64 {
+    static N: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("VICTORY_PARTIAL_FRAMES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(30).max(1)
+    })
+}
+
 /// Whether a guarded texture whose memory the hash found changed although
 /// the guard saw no write is hashed at every check for a while
 /// ([`HOT_FRAMES`]), not every eighth frame. A title that writes such a
@@ -1546,7 +1557,7 @@ impl Staging {
             // unmapped pages is slow, and nothing tells us when pages
             // arrive): a mip that streams in shows up to 30 frames late.
             let frame = crate::frame::current();
-            if !exact && last.partial.is_some_and(|at| frame < at + 30) {
+            if !exact && last.partial.is_some_and(|at| frame < at + partial_frames()) {
                 return 0;
             }
             last.partial = Some(frame);
