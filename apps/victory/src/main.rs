@@ -126,6 +126,9 @@ enum Command {
         /// (What the processes it starts are given.)
         #[arg(long, hide = true)]
         these: Option<String>,
+        /// Stop taking new ones after this many minutes.
+        #[arg(long)]
+        minutes: Option<f64>,
     },
     /// Prepare, map and bind a title executable; with --execute, run it.
     Run {
@@ -233,7 +236,7 @@ fn main() -> Result<()> {
         }
         Command::Shaders { paths, jobs } => translate::precompile(paths, jobs),
         #[cfg(windows)]
-        Command::Warm { jobs, limit, again, used, these } => warm::run(jobs, limit, again, used, these),
+        Command::Warm { jobs, limit, again, used, these, minutes } => warm::run(jobs, limit, again, used, these, minutes),
         Command::Run {
             exe,
             unimplemented,

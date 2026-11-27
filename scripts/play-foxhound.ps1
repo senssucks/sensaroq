@@ -18,6 +18,9 @@ param(
     [Parameter(Mandatory)][string]$Exe,
     [ValidateSet('diag', 'release')][string]$Build = 'release',
     [switch]$SeriesS,
+    # Before the game opens: the shaders the last run drew with are built, those of the place it was left in first,
+    # with a bar, for at most this many minutes (0: not). After an update that changes shaders this fills the cache.
+    [double]$WarmMinutes = 4,
     # 1440: output and scene 2560x1440 (Series X, the image is patched); 1080to1440: scene 1920x1080 upscaled by
     # the title; 4k: the stock Series X output (3840x2160).
     [ValidateSet('1440', '1080to1440', '4k')][string]$Res = '1440',
@@ -184,6 +187,10 @@ if ($Warm) {
     try { & $victory warm --used; if ($LASTEXITCODE -eq 0) { & $victory warm } }
     finally { Pop-Location }
     return
+}
+if ($WarmMinutes -gt 0) {
+    Push-Location $repo
+    try { & $victory warm --used --minutes $WarmMinutes } finally { Pop-Location }
 }
 $logs = Join-Path $env:LOCALAPPDATA 'victory\logs'; New-Item -ItemType Directory -Force $logs | Out-Null
 $log = Join-Path $logs ('foxhound-{0:yyyyMMdd-HHmmss}.log' -f (Get-Date))

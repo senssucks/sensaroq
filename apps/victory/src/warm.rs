@@ -26,12 +26,13 @@ fn folder() -> Result<PathBuf> {
     Ok(cfg.cache_subdir("shaders")?.with_file_name("pipelines"))
 }
 
-pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, these: Option<String>) -> Result<()> {
+pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, these: Option<String>, minutes: Option<f64>) -> Result<()> {
     let dir = folder()?;
     if let Some(these) = these {
         return make(&dir, &these);
     }
     let began = Instant::now();
+    let until = minutes.map(|m| began + Duration::from_secs_f64(m.max(0.0) * 60.0));
     victory_hle::known_pipelines::use_translations(dir.with_file_name("shaders"));
     let fingerprint = known::fingerprint();
     let done_file = dir.join("warm-done.txt");
@@ -50,6 +51,10 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     let bad: HashSet<&str> = bad.lines().filter_map(|l| l.split(' ').next()).collect();
     let early = std::fs::read_to_string(dir.join("early-pipelines.txt")).unwrap_or_default();
     let early: HashSet<&str> = early.lines().collect();
+    // What the last run drew with last, the latest first: the place the game
+    // was left in, where the save goes on.
+    let recent = std::fs::read_to_string(dir.join("recent-pipelines.txt")).unwrap_or_default();
+    let recent: std::collections::HashMap<&str, usize> = recent.lines().enumerate().map(|(i, k)| (k, i)).collect();
     // Those earlier runs drew with first, the others in no order (by key).
     let mut all: Vec<usize> = (0..keys.len())
         .filter(|&n| {
@@ -57,7 +62,10 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
             (again || !done.contains(key)) && !bad.contains(key) && (!used || early.contains(key))
         })
         .collect();
-    all.sort_by_key(|&n| (!early.contains(keys[n].as_str()), &keys[n]));
+    all.sort_by_key(|&n| {
+        let key = keys[n].as_str();
+        (recent.get(key).copied().unwrap_or(usize::MAX), !early.contains(key), &keys[n])
+    });
     all.truncate(limit.unwrap_or(usize::MAX));
     let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
     let jobs = jobs.unwrap_or(cores * 2 / 3).max(1);
@@ -78,7 +86,9 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     std::thread::scope(|s| {
         for _ in 0..jobs.min(chunks.len()) {
             s.spawn(|| {
-                while let Some(&chunk) = chunks.get(next.fetch_add(1, Ordering::Relaxed)) {
+                while until.is_none_or(|t| Instant::now() < t)
+                    && let Some(&chunk) = chunks.get(next.fetch_add(1, Ordering::Relaxed))
+                {
                     let mut rest = chunk;
                     while !rest.is_empty() {
                         let (made, ended) = child(rest, |n, ms, there| {
@@ -89,9 +99,7 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
                             state.0.push(ms);
                             state.1 += usize::from(!there);
                             let count = state.0.len();
-                            if count % 1000 == 0 {
-                                println!("{count} of {}, {:.0} s", all.len(), began.elapsed().as_secs_f64());
-                            }
+                            bar(count, all.len(), began, until);
                             drop(state);
                             let _ = writeln!(lock(&done_out), "{fingerprint} {}", keys[n]);
                         });
@@ -111,6 +119,10 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
             });
         }
     });
+    println!();
+    if until.is_some_and(|t| Instant::now() >= t) {
+        println!("time is up: the rest are made while the game runs (and by the next warm)");
+    }
     let (mut times, refused, crashed) = state.into_inner().unwrap_or_else(|e| e.into_inner());
     times.sort_by(f64::total_cmp);
     let at = |q: f64| times.get((times.len() as f64 * q) as usize).copied().unwrap_or(0.0);
@@ -125,6 +137,28 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         times.iter().sum::<f64>() / 1e3
     );
     Ok(())
+}
+
+/// A line with a bar of how far it is, written over itself.
+fn bar(count: usize, all: usize, began: Instant, until: Option<Instant>) {
+    const WIDE: usize = 30;
+    let step = (all / 200).max(1);
+    if count % step != 0 && count != all {
+        return;
+    }
+    let done = count as f64 / all.max(1) as f64;
+    let filled = ((done * WIDE as f64) as usize).min(WIDE);
+    let spent = began.elapsed().as_secs_f64();
+    let left = if count > 0 { spent / count as f64 * (all - count) as f64 } else { 0.0 };
+    let cap = until.map_or(String::new(), |t| format!(", stops in {:.0} s", t.saturating_duration_since(Instant::now()).as_secs_f64()));
+    print!(
+        "\rbuilding shaders [{}{}] {:>3.0}%  {count}/{all}  about {:.0} s left{cap}    ",
+        "#".repeat(filled),
+        ".".repeat(WIDE - filled),
+        done * 100.0,
+        left
+    );
+    let _ = std::io::stdout().flush();
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
