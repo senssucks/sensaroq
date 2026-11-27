@@ -405,13 +405,25 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         let first = description
             .as_ref()
             .and_then(|w| words(w[0] as usize));
-        tracing::warn!(
-            slot = format_args!("{:#x}", SLOT),
-            calls,
-            description = format_args!("{description:x?}"),
-            first_points_at = format_args!("{first:x?}"),
-            "a pipeline creation method that is not implemented: the title goes without this pipeline"
-        );
+        // The first four as warnings; later powers of two at debug (the
+        // title asks some 16,000 times a session, which is known).
+        if calls <= 4 {
+            tracing::warn!(
+                slot = format_args!("{:#x}", SLOT),
+                calls,
+                description = format_args!("{description:x?}"),
+                first_points_at = format_args!("{first:x?}"),
+                "a pipeline creation method that is not implemented: the title goes without this pipeline"
+            );
+        } else {
+            tracing::debug!(
+                slot = format_args!("{:#x}", SLOT),
+                calls,
+                description = format_args!("{description:x?}"),
+                first_points_at = format_args!("{first:x?}"),
+                "a pipeline creation method that is not implemented: the title goes without this pipeline"
+            );
+        }
     }
     E_NOTIMPL
 }

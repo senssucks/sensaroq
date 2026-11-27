@@ -454,7 +454,10 @@ unsafe extern "C" fn log_message(kind: u32, message: *const c_char) {
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     let text = text.trim_end();
     // (Every plugin in the folder that was not asked for says so.)
-    let noise = text.contains("since it is was not requested by the host");
+    // (Frame generation resets its frame timer whenever a frame takes longer
+    // than its limit: at our frame rates that is every frame, thousands of
+    // lines a session with nothing wrong.)
+    let noise = text.contains("since it is was not requested by the host") || text.contains("reseting frame timer");
     match kind {
         abi::LOG_ERROR => tracing::error!(target: "streamline", "{text}"),
         abi::LOG_WARN if !noise => tracing::warn!(target: "streamline", "{text}"),
