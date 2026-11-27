@@ -150,6 +150,10 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     });
     println!();
     let mut made_ok = made_ok.into_inner().unwrap_or_else(|e| e.into_inner());
+    // Only those runs drew with: the library is read into memory whole by
+    // every run, and at ~80 KB a pipeline all 90,000 the title creates would
+    // be some 7 GB of it.
+    made_ok.retain(|&n| early.contains(keys[n].as_str()));
     if !made_ok.is_empty() {
         made_ok.sort_unstable();
         print!("putting {} into the game's pipeline library ...", made_ok.len());
