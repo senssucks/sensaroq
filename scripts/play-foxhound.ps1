@@ -49,7 +49,9 @@ param(
     # Stop it at any time (Ctrl+C); it goes on where it stopped. Once per change of the layer or of the driver.
     [switch]$Warm,
     # Only the pre-build menu (and the building chosen), then end without starting the game.
-    [switch]$WarmOnly
+    [switch]$WarmOnly,
+    # More arguments for victory warm (such as '--again --limit 300': made again, to time the driver's cache).
+    [string]$WarmExtra = ''
 )
 $repo = Split-Path $PSScriptRoot -Parent
 # Windows' commit limit (RAM plus the page file). The title reserves memory as a console does, and with the layer's
@@ -228,7 +230,7 @@ if (-not $pick) {
 if ($pick -ne 'D') {
     $cap = if ($WarmMinutes -gt 0) { @('--minutes', "$WarmMinutes") } else { @() }
     Push-Location $repo
-    try { & $victory warm @($choices[$pick].Args) @cap } finally { Pop-Location }
+    try { & $victory warm @($choices[$pick].Args) @cap @(-split $WarmExtra) } finally { Pop-Location }
 }
 if ($WarmOnly) { Write-Host 'Pre-building is over; start the game with your usual launcher.'; return }
 $logs = Join-Path $env:LOCALAPPDATA 'victory\logs'; New-Item -ItemType Directory -Force $logs | Out-Null
