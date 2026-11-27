@@ -67,5 +67,6 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [TaynanGT/Vice-Tay PR #191](https://github.com/TaynanGT/Vice-Tay/pull/191) | AVX2/SSE2 micro-tile texture detiler and worker pool (1.6-4.6x on large textures) | Vladimir |
 | [DoubleGhosty/cool_fox PR #47](https://github.com/DoubleGhosty/cool_fox/pull/47) | Title memory reads zero only the bytes no run covers | Esteban Viera |
 | [DoubleGhosty/cool_fox PR #49](https://github.com/DoubleGhosty/cool_fox/pull/49) | Per-draw maps keyed by address use AddressHash, not SipHash | Esteban Viera |
+| [HumanlyDev/HUMAN PR #18](https://github.com/HumanlyDev/HUMAN/pull/18) | Dynamic descriptor slots as a bitset, searched 64 at a time (hand-ported) | HumanlyDev |
 
 The NVIDIA fork watch that finds these lives in the project notes. New ports are added here as they land.
