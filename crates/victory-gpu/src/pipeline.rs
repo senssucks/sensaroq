@@ -123,6 +123,14 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
         .clone()
 }
 
+/// The shader of `stage` whose logged hash is `hash`, if the title has made
+/// one ([`make`]'s substitutions).
+#[cfg(windows)]
+pub(crate) fn by_hash(stage: &str, hash: &str) -> Option<Arc<Shader>> {
+    let shaders = SHADERS.lock().unwrap_or_else(|e| e.into_inner());
+    shaders.as_ref()?.values().find(|s| s.stage == stage && s.hash == hash).cloned()
+}
+
 /// A translated shader and the console resources its code reads.
 #[cfg(windows)]
 pub(crate) struct Translated {

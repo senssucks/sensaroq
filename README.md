@@ -1,5 +1,6 @@
 > **sensaroq** is based on [VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA) (itself on foxhound), with two additions:
 > - the engine makes its Direct3D 12 device on the first high-performance hardware adapter that supports mesh shaders, so a PC with integrated graphics (a Ryzen G APU, for instance) does not render on the iGPU; `VICTORY_ADAPTER=<index or part of the name>` overrides it;
+> - `VICTORY_SHADER_SUBSTITUTE=foliage` (off by default) lights foliage with the standard material shader instead of the translucency one, which comes out purple, blue and orange on NVIDIA ([Marvisak/VIctory#3279](https://github.com/Marvisak/VIctory/issues/3279)); `<from>=<to>` pairs of logged pixel-shader hashes work too;
 > - every 5 s the log has a `dstorage: last 5.0 s` line with streaming requests done, failed, the slowest one and those waiting (`VICTORY_DSTORAGE_STATS=0` turns it back to debug level).
 
 # VIctory on NVIDIA

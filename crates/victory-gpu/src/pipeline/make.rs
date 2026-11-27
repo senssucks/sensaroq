@@ -182,7 +182,8 @@ impl Pending {
     fn make(&self) {
         self.made.get_or_init(|| {
             let began = Instant::now();
-            let made = HostPipeline::new(&self.shaders, self.graphics.as_deref());
+            let substituted = substitutes(&self.shaders);
+            let made = HostPipeline::new(substituted.as_deref().unwrap_or(&self.shaders), self.graphics.as_deref());
             super::library::note_time(&self.key, began.elapsed().as_millis() as u64);
             made
         });
@@ -190,6 +191,64 @@ impl Pending {
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         done.notify_all();
     }
+}
+
+/// Pixel shaders drawn with another of the title's pixel shaders in their
+/// place (`VICTORY_SHADER_SUBSTITUTE=<from>=<to>[,..]`, 16-hex-digit hashes as
+/// logged; unset: none; `foliage`: the list below).
+///
+/// The tiled lighting pass draws one pixel shader per material class. Its
+/// translucency class (`PS_PBR_MATERIAL_TRANSLUCENCY_42ad1e50`, a9a0b814cd938ec0)
+/// lights foliage purple, blue and orange on the host while its G-buffer input
+/// is right (Marvisak/VIctory#3279, still open); the standard class
+/// (`PS_PBR_MATERIAL_STANDARD`, 1cd9bc634417a981) lights the same frame right and
+/// binds the same resources. `foliage` lights foliage as standard material: no
+/// light through the leaves, but green. A stopgap until the translation is found.
+/// The pipeline is made with the substitute's code and bindings; a substitute
+/// the title has not made yet when the pipeline is made is not used.
+fn substitutes(shaders: &[Arc<super::Shader>]) -> Option<Vec<Arc<super::Shader>>> {
+    static PAIRS: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    let pairs = PAIRS.get_or_init(|| {
+        let value = std::env::var("VICTORY_SHADER_SUBSTITUTE").unwrap_or_default();
+        let value = if value.trim() == "foliage" { "a9a0b814cd938ec0=1cd9bc634417a981".to_owned() } else { value };
+        let pairs: Vec<(String, String)> = value
+            .split(',')
+            .filter_map(|pair| {
+                let (from, to) = pair.split_once('=')?;
+                let ok = |h: &str| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit());
+                let (from, to) = (from.trim().to_ascii_lowercase(), to.trim().to_ascii_lowercase());
+                (ok(&from) && ok(&to)).then_some((from, to))
+            })
+            .collect();
+        if !pairs.is_empty() {
+            tracing::info!(?pairs, "pixel shaders drawn with substitutes (VICTORY_SHADER_SUBSTITUTE)");
+        }
+        pairs
+    });
+    if pairs.is_empty() {
+        return None;
+    }
+    let mut changed = false;
+    let out = shaders
+        .iter()
+        .map(|s| {
+            let Some((_, to)) = pairs.iter().find(|(from, _)| *from == s.hash) else {
+                return s.clone();
+            };
+            match super::by_hash(s.stage, to) {
+                Some(substitute) => {
+                    changed = true;
+                    tracing::info!(from = %s.hash, to = %substitute.hash, stage = s.stage, "shader substituted");
+                    substitute
+                }
+                None => {
+                    tracing::warn!(from = %s.hash, to = %to, "substitute shader not made by the title yet: not substituted");
+                    s.clone()
+                }
+            }
+        })
+        .collect();
+    changed.then_some(out)
 }
 
 /// Why a pipeline has no host pipeline (diagnostics): left out on purpose
