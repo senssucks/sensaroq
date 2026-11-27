@@ -233,7 +233,17 @@ fn wait_resident() -> bool {
 
 /// The flag memory is made with that [`resident`] waits for.
 pub(crate) fn not_resident() -> D3D12_HEAP_FLAGS {
-    if wait_resident() { D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT } else { D3D12_HEAP_FLAG_NONE }
+    if wait_resident() && !resident_at_make() { D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT } else { D3D12_HEAP_FLAG_NONE }
+}
+
+/// New memory made resident by its making, as the runtime does it, instead
+/// of made not resident and then `MakeResident` (`VICTORY_RESIDENT_AT_MAKE=1`;
+/// off by default). The wait for its mapping ([`mapped`]) stays, which is
+/// what kept the device from faulting (runs n08, n11). For run 22b's 114 s
+/// in `MakeResident`: whether the making itself costs as much.
+fn resident_at_make() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_RESIDENT_AT_MAKE").is_some_and(|v| v == "1"))
 }
 
 /// A queue of its own that new memory is waited for with ([`mapped`]).
@@ -255,7 +265,13 @@ unsafe impl Send for Aside {}
 /// for so far are done, and waited for. (`MakeResident` came back before
 /// that: run n11 was lost as n08 was with it alone.) Best done off a hot
 /// path: a tenth of a millisecond to some.
+#[track_caller]
 pub(crate) fn mapped(device: &ID3D12Device) -> windows::core::Result<()> {
+    mapped_at(device, std::panic::Location::caller())
+}
+
+/// [`mapped`], tallied for `at` ([`take_making`]).
+pub(crate) fn mapped_at(device: &ID3D12Device, at: &'static std::panic::Location<'static>) -> windows::core::Result<()> {
     static ASIDE: Mutex<Option<Aside>> = Mutex::new(None);
     if !wait_resident() {
         return Ok(());
@@ -315,6 +331,7 @@ pub(crate) fn mapped(device: &ID3D12Device) -> windows::core::Result<()> {
         }
     }
     let us = started.elapsed().as_micros() as u64;
+    tally_making(at, 1, us);
     MAPPED[0].fetch_add(1, Ordering::Relaxed);
     MAPPED[1].fetch_add(us, Ordering::Relaxed);
     MAPPED[2].fetch_max(us, Ordering::Relaxed);
@@ -333,8 +350,44 @@ pub(crate) fn mapped(device: &ID3D12Device) -> windows::core::Result<()> {
 static MAPPED: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
 /// New memory (made with [`not_resident`]) is resident when this returns.
+#[track_caller]
 pub(crate) fn resident(device: &ID3D12Device, object: &impl Interface) -> windows::core::Result<()> {
-    if !wait_resident() {
+    resident_at(device, object, std::panic::Location::caller())
+}
+
+/// Where new memory was waited for ([`resident`], [`mapped`]), by the
+/// place in our code that made it and the thread: the times, the
+/// microseconds in `MakeResident` and those waiting for the mapping. Run
+/// 22b waited 114 s in `MakeResident` and 49 s for mappings in 16 minutes
+/// (171,000 and 105,000 times; 18 s and 3 s before the world was up), and
+/// nothing said what was made, nor on which thread.
+type Making = std::collections::HashMap<(&'static str, u32, String), [u64; 3]>;
+static MAKING: Mutex<Option<Making>> = Mutex::new(None);
+
+fn tally_making(at: &'static std::panic::Location<'static>, what: usize, us: u64) {
+    let thread = std::thread::current().name().unwrap_or("unnamed").to_owned();
+    let mut making = MAKING.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = making.get_or_insert_with(Making::new).entry((at.file(), at.line(), thread)).or_default();
+    if what == 0 {
+        entry[0] += 1;
+    }
+    entry[what + 1] += us;
+}
+
+/// [`MAKING`] since the last call, the most time first.
+pub(crate) fn take_making() -> Vec<((&'static str, u32, String), [u64; 3])> {
+    let mut all: Vec<_> = MAKING.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default().into_iter().collect();
+    all.sort_by_key(|(_, t)| std::cmp::Reverse(t[1] + t[2]));
+    all
+}
+
+/// [`resident`], tallied for `at`.
+pub(crate) fn resident_at(
+    device: &ID3D12Device,
+    object: &impl Interface,
+    at: &'static std::panic::Location<'static>,
+) -> windows::core::Result<()> {
+    if !wait_resident() || resident_at_make() {
         return Ok(());
     }
     let started = std::time::Instant::now();
@@ -342,6 +395,7 @@ pub(crate) fn resident(device: &ID3D12Device, object: &impl Interface) -> window
     // SAFETY: a live heap or resource of the device's.
     let made = unsafe { device.MakeResident(&[Some(object)]) };
     let us = started.elapsed().as_micros() as u64;
+    tally_making(at, 0, us);
     RESIDENT[0].fetch_add(1, Ordering::Relaxed);
     RESIDENT[1].fetch_add(us, Ordering::Relaxed);
     RESIDENT[2].fetch_max(us, Ordering::Relaxed);
@@ -9430,7 +9484,9 @@ impl Host {
         }
     }
 
+    #[track_caller]
     pub(crate) fn upload_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+        let at = std::panic::Location::caller();
         crate::census::made(1, size);
         MADE[0].fetch_add(1, Ordering::Relaxed);
         MADE[1].fetch_add(size, Ordering::Relaxed);
@@ -9466,7 +9522,7 @@ impl Host {
                 )
                 .and_then(|()| {
                     let b = buffer.as_ref().ok_or_else(windows::core::Error::empty)?;
-                    resident(&self.device, b)?;
+                    resident_at(&self.device, b, at)?;
                     b.Map(0, None, Some(&mut data))
                 })
         };
@@ -9712,6 +9768,23 @@ impl Meter {
                             lists[1],
                             lists[3]
                         );
+                    }
+                    let making = take_making();
+                    if !making.is_empty() && since > 0.0 {
+                        let [n, r, m] = making.iter().fold([0u64; 3], |s, (_, t)| [s[0] + t[0], s[1] + t[1], s[2] + t[2]]);
+                        tracing::info!(
+                            "new memory made and waited for, last {since:.0} s (VICTORY_WAIT_RESIDENT): {n} made, {:.0} ms making it resident, \
+                             {:.0} ms waiting for its mapping; by where and thread:",
+                            r as f64 / 1000.0,
+                            m as f64 / 1000.0
+                        );
+                        for ((file, line, thread), [n, r, m]) in making.iter().take(10) {
+                            tracing::info!(
+                                "  {file}:{line} on {thread}: {n} made, {:.0} ms resident, {:.0} ms mapping",
+                                *r as f64 / 1000.0,
+                                *m as f64 / 1000.0
+                            );
+                        }
                     }
                     let tally = crate::pipeline::take_drop_tally();
                     let all: u64 = tally.iter().map(|t| t.1).sum();
@@ -10610,7 +10683,9 @@ impl Host {
     /// it is fast too) and shaders read and write: for host copies of title
     /// memory that shaders write, which upload memory cannot be. Starts in
     /// the common state (buffers move out of it implicitly).
+    #[track_caller]
     pub(crate) fn shared_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+        let at = std::panic::Location::caller();
         crate::census::made(2, size);
         MADE[2].fetch_add(1, Ordering::Relaxed);
         MADE[3].fetch_add(size, Ordering::Relaxed);
@@ -10649,8 +10724,8 @@ impl Host {
                 )
                 .and_then(|()| {
                     let b = buffer.as_ref().ok_or_else(windows::core::Error::empty)?;
-                    resident(&self.device, b)?;
-                    mapped(&self.device)?;
+                    resident_at(&self.device, b, at)?;
+                    mapped_at(&self.device, at)?;
                     b.Map(0, None, Some(&mut data))
                 })
         };
@@ -10695,7 +10770,9 @@ impl Host {
     /// A buffer in the card's own memory that the CPU maps, shaders read and
     /// (with `written`) may write. The CPU should only write it: a read of the
     /// mapping crosses the bus a few bytes at a time.
+    #[track_caller]
     pub(crate) fn mapped_card_buffer(&self, size: u64, written: bool) -> Option<(ID3D12Resource, *mut u8)> {
+        let at = std::panic::Location::caller();
         if !self.mapped_card_memory() {
             return None;
         }
@@ -10738,8 +10815,8 @@ impl Host {
                 )
                 .and_then(|()| {
                     let b = buffer.as_ref().ok_or_else(windows::core::Error::empty)?;
-                    resident(&self.device, b)?;
-                    mapped(&self.device)?;
+                    resident_at(&self.device, b, at)?;
+                    mapped_at(&self.device, at)?;
                     b.Map(0, None, Some(&mut data))
                 })
         };
@@ -10754,7 +10831,9 @@ impl Host {
 
     /// A device-local buffer shaders may write (unordered access) and indirect
     /// execution may read, starting in the common state.
+    #[track_caller]
     pub(crate) fn uav_buffer(&self, size: u64) -> Option<ID3D12Resource> {
+        let at = std::panic::Location::caller();
         crate::census::made(3, size);
         MADE[4].fetch_add(1, Ordering::Relaxed);
         MADE[5].fetch_add(size, Ordering::Relaxed);
@@ -10792,7 +10871,7 @@ impl Host {
         if let Some(b) = &buffer {
             crate::book::made(b, || "an unordered access buffer".into());
         }
-        let made = made.and_then(|()| buffer.as_ref().map_or(Ok(()), |b| resident(&self.device, b))).and_then(|()| mapped(&self.device));
+        let made = made.and_then(|()| buffer.as_ref().map_or(Ok(()), |b| resident_at(&self.device, b, at))).and_then(|()| mapped_at(&self.device, at));
         match made {
             Ok(()) => buffer,
             Err(e) => {
