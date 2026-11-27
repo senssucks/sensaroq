@@ -609,7 +609,8 @@ unsafe impl Send for Job {}
 /// oversubscribes the cores the submitting thread and the copies need. One
 /// 8-core/16-thread laptop ran 16 workers and had the submitting thread
 /// waiting behind them; 8 measured `copying back` at 2.4-3.5 ms/MB against
-/// 5.7 ms/MB with 16. `VICTORY_DSTORAGE_WORKERS` sets the count outright.
+/// 5.7 ms/MB with 16 (`VICTORY_DSTORAGE_PHYSICAL=1`; off by default: one per
+/// logical processor, as before). `VICTORY_DSTORAGE_WORKERS` sets the count outright.
 fn worker_count() -> usize {
     static COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *COUNT.get_or_init(|| {
@@ -621,6 +622,11 @@ fn worker_count() -> usize {
             return n;
         }
         let logical = std::thread::available_parallelism().map_or(4, |n| n.get());
+        // Off by default (`VICTORY_DSTORAGE_PHYSICAL=1`): one worker per
+        // logical processor, as before.
+        if std::env::var_os("VICTORY_DSTORAGE_PHYSICAL").is_none_or(|v| v != "1") {
+            return logical;
+        }
         match physical_cores() {
             Some(cores) => {
                 tracing::info!(cores, logical, "dstorage: physical cores, from the system");
