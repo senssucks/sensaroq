@@ -163,10 +163,10 @@ pub(crate) fn critical_commit() -> bool {
 /// The PC's RAM in use, in thousandths (sampled once a second).
 static RAM_USED_PERMILLE: AtomicU64 = AtomicU64::new(0);
 
-/// `VICTORY_RAM_LIMIT_PERCENT` (95 by default), in thousandths.
+/// `VICTORY_RAM_LIMIT_PERCENT` (98 by default), in thousandths.
 fn ram_limit_permille() -> u64 {
     static P: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *P.get_or_init(|| std::env::var("VICTORY_RAM_LIMIT_PERCENT").ok().and_then(|v| v.trim().parse::<f64>().ok()).map_or(950, |p| (p.clamp(50.0, 100.0) * 10.0) as u64))
+    *P.get_or_init(|| std::env::var("VICTORY_RAM_LIMIT_PERCENT").ok().and_then(|v| v.trim().parse::<f64>().ok()).map_or(980, |p| (p.clamp(50.0, 100.0) * 10.0) as u64))
 }
 
 fn pressured_prefetch_bytes() -> u64 {
