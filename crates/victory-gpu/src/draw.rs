@@ -3777,6 +3777,7 @@ impl State {
                 "a dispatch without a host pipeline dropped"
             );
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            crate::pipeline::tally_drop(self.pipeline as This);
             #[cfg(feature = "diagnostics")]
             {
                 crate::pipeline::note_drop(self.pipeline as This);
@@ -3790,6 +3791,7 @@ impl State {
         }
         if !self.bind(list, p, true) {
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            crate::pipeline::tally_drop(self.pipeline as This);
             // A stage of the structure builder that cannot be bound is a
             // dropped stage: the others stop too.
             if crate::pipeline::is_builder(self.pipeline as This) {
@@ -4376,6 +4378,7 @@ impl State {
             };
         if !ran {
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            crate::pipeline::tally_drop(self.pipeline as This);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
         }
@@ -4863,6 +4866,7 @@ impl State {
         }
         if !ran {
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            crate::pipeline::tally_drop(self.pipeline as This);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
         }
@@ -5046,6 +5050,7 @@ impl State {
         }
         if !ran {
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            crate::pipeline::tally_drop(self.pipeline as This);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
         }

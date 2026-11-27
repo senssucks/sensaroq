@@ -592,6 +592,53 @@ pub(crate) fn take_drops() -> Vec<(String, u64)> {
     drops
 }
 
+/// `VICTORY_DROP_REASONS` (default 1; 0 off): dropped draws and dispatches
+/// counted by pipeline in every build, and every 30 s the reasons that
+/// dropped the most logged (left out on purpose, shaders that do not
+/// translate, still being made, or a host pipeline that could not be bound).
+/// One map entry per pipeline; the reason is worked out once, at its first drop.
+static DROP_TALLY: Mutex<Option<HashMap<usize, (u64, String)>>> = Mutex::new(None);
+
+pub(crate) fn drop_reasons() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VICTORY_DROP_REASONS").map_or(true, |v| v.trim() != "0"))
+}
+
+/// Counts a draw or dispatch of `this` dropped on the host.
+pub(crate) fn tally_drop(this: This) {
+    if !drop_reasons() {
+        return;
+    }
+    let mut tally = DROP_TALLY.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = tally.get_or_insert_with(HashMap::new).entry(this as usize).or_insert_with(|| {
+        let why = if this.is_null() {
+            "no pipeline set".to_owned()
+        } else {
+            let p = pipeline(this);
+            let why = make::missing(&p.host).unwrap_or_else(|| {
+                "has a host pipeline, not bound (descriptor slots or root arguments)".to_owned()
+            });
+            format!("{why} [{}]", make::hashes(&p.host))
+        };
+        (0, why)
+    });
+    entry.0 += 1;
+}
+
+/// The drops counted since the last call by reason, most first.
+pub(crate) fn take_drop_tally() -> Vec<(String, u64)> {
+    let Some(tally) = DROP_TALLY.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+        return Vec::new();
+    };
+    let mut by: HashMap<String, u64> = HashMap::new();
+    for (_, (n, why)) in tally {
+        *by.entry(why).or_default() += n;
+    }
+    let mut by: Vec<(String, u64)> = by.into_iter().collect();
+    by.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    by
+}
+
 /// The stage's container, if it has one.
 fn copy(stage: &'static str, code: &Bytecode) -> Option<Arc<Shader>> {
     if code.code.is_null() || code.size == 0 {

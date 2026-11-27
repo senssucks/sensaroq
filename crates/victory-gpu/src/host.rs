@@ -9682,6 +9682,25 @@ impl Meter {
         let drops = crate::pipeline::take_drops();
         if self.logged.elapsed() >= std::time::Duration::from_secs(5) {
             self.logged = std::time::Instant::now();
+            {
+                static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+                let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+                if last.is_none_or(|t| t.elapsed().as_secs() >= 30) {
+                    let since = last.map_or(0.0, |t| t.elapsed().as_secs_f64());
+                    *last = Some(std::time::Instant::now());
+                    let tally = crate::pipeline::take_drop_tally();
+                    let all: u64 = tally.iter().map(|t| t.1).sum();
+                    if all > 0 && since > 0.0 {
+                        tracing::info!(
+                            "draws and dispatches dropped on the host, last {since:.0} s (VICTORY_DROP_REASONS): {all} in all, {} reasons",
+                            tally.len()
+                        );
+                        for (why, n) in tally.iter().take(12) {
+                            tracing::info!("  dropped {n} ({:.0}%): {why}", *n as f64 * 100.0 / all as f64);
+                        }
+                    }
+                }
+            }
             tracing::info!(
                 "placed texture views: {} writes of another view of the texture a slot showed (it kept the old view until the new was made)",
                 crate::descriptor::host::KEPT_VIEWS.load(Ordering::Relaxed)
