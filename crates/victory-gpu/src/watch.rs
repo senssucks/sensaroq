@@ -3107,6 +3107,17 @@ pub fn title_memory_made_real(at: usize, len: usize) {
     open(&mut g, at, at.saturating_add(len));
 }
 
+/// Faults in memory of ours or the title's that the handler below took
+/// (guarded blocks opened, lazily mapped memory mapped, copies of ours
+/// failing), and nanoseconds in it, of all threads (the title's mostly):
+/// each also costs the system's dispatch, some microseconds, not counted.
+static HANDLED: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+/// See [`HANDLED`], since the last call.
+pub(crate) fn take_handled() -> [u64; 2] {
+    [0, 1].map(|i| HANDLED[i].swap(0, std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Registers the handler that takes writes to guarded blocks, once, ahead
 /// of the crash reporter's.
 pub(crate) fn install() {
@@ -3116,6 +3127,16 @@ pub(crate) fn install() {
         EXCEPTION_POINTERS,
     };
     unsafe extern "system" fn on_write(info: *mut EXCEPTION_POINTERS) -> i32 {
+        let began = std::time::Instant::now();
+        // SAFETY: as the system passes it.
+        let answer = unsafe { look_at(info) };
+        if answer == EXCEPTION_CONTINUE_EXECUTION {
+            HANDLED[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            HANDLED[1].fetch_add(began.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        answer
+    }
+    unsafe fn look_at(info: *mut EXCEPTION_POINTERS) -> i32 {
         let _fault = crate::timeline::span("a fault looked at");
         // SAFETY: the system passes the exception being dispatched.
         let r = unsafe { &*(*info).ExceptionRecord };
