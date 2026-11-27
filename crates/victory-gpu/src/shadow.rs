@@ -3966,9 +3966,36 @@ impl Shadow {
         if !matches!(self.watched.load(Ordering::Relaxed), 1 | GUARDED) {
             return false;
         }
-        // Around ranges shaders are writing the refresh asks gap by gap.
-        if self.pending.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|&(a, e)| a < to && e > from) {
-            return false;
+        // Around ranges shaders are writing the refresh asks gap by gap
+        // ([`Shadow::update`]): it copies nothing when no gap has anything
+        // new (`VICTORY_GAPS_KNOWN=0`: asked, as before). In the world most
+        // submissions have such ranges, so most refreshes that copied
+        // nothing used to ask anyway.
+        let mut busy: Vec<(usize, usize)> = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .copied()
+            .filter(|&(a, e)| a < to && e > from)
+            .collect();
+        if !busy.is_empty() {
+            if !crate::toggled!("VICTORY_GAPS_KNOWN") {
+                return false;
+            }
+            busy.sort_unstable();
+            let copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
+            let (mut at, mut gaps) = (from, Vec::new());
+            for (a, e) in busy {
+                if a > at {
+                    gaps.push((at, a));
+                }
+                at = at.max(e);
+            }
+            if at < to {
+                gaps.push((at, to));
+            }
+            return gaps.into_iter().all(|(a, e)| crate::watch::nothing_new(a, e, start / PAGE, &copied, self.ranged(a, e)));
         }
         let copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
         let same = crate::watch::nothing_new(from, to, start / PAGE, &copied, self.ranged(from, to));
