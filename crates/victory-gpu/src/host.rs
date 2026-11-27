@@ -10042,6 +10042,12 @@ impl Host {
             } else {
                 crate::popwatch::take(&self.device, list, texture)
             };
+            // The loading cover (`cover.rs`): plain gray over a half-made picture.
+            if crate::cover::this_present() {
+                list.ResourceBarrier(&[transition(&back, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET)]);
+                list.ClearRenderTargetView(self.rtv(Some(&back), None), &crate::cover::GRAY, None);
+                list.ResourceBarrier(&[transition(&back, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST)]);
+            }
             p.panel.draw(self, copy, &back, (width, height), format);
             p.menu.draw(self, copy, &back, (width, height), format);
             #[cfg(not(feature = "diagnostics"))]

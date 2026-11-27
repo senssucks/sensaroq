@@ -333,6 +333,15 @@ pub(crate) fn take_left_out() -> u64 {
     LEFT_OUT.swap(0, Ordering::Relaxed)
 }
 
+/// Draws and dispatches that went without their pipeline because it was
+/// still being made (not because it failed), since [`take_not_made_yet`].
+static NOT_MADE_YET: AtomicU64 = AtomicU64::new(0);
+
+/// See [`NOT_MADE_YET`] (for the loading cover, `cover.rs`).
+pub(crate) fn take_not_made_yet() -> u64 {
+    NOT_MADE_YET.swap(0, Ordering::Relaxed)
+}
+
 /// Pipelines queued and not made yet (for the frame line).
 pub(crate) fn waiting() -> u64 {
     WAITING.load(Ordering::Relaxed)
@@ -354,6 +363,9 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
         p.asks.fetch_add(1, Ordering::Relaxed);
         start(p, REQUESTED);
         wait(p, crate::frame::current());
+        if p.made.get().is_none() {
+            NOT_MADE_YET.fetch_add(1, Ordering::Relaxed);
+        }
     }
     p.made.get()?.as_ref()
 }

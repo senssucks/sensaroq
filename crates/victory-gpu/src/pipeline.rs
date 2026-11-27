@@ -487,6 +487,13 @@ pub(crate) fn take_left_out() -> u64 {
     make::take_left_out()
 }
 
+/// Draws and dispatches that went without a pipeline still being made,
+/// since the last call (the loading cover's measure).
+#[cfg(windows)]
+pub(crate) fn take_not_made_yet() -> u64 {
+    make::take_not_made_yet()
+}
+
 /// Draws and dispatches dropped since the last [`take_drops`], by reason
 /// (diagnostics).
 #[cfg(all(windows, feature = "diagnostics"))]

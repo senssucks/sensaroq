@@ -28,6 +28,8 @@ mod copystat;
 mod faultbook;
 #[cfg(windows)]
 mod cores;
+#[cfg(windows)]
+mod cover;
 pub mod descriptor;
 pub mod device;
 #[cfg(windows)]
