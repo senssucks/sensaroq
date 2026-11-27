@@ -61,5 +61,9 @@ Each change is in sensaroq's history with the source commit or pull request it c
 |---|---|---|
 | [PastiiJay/klbf-lab PR #41](https://github.com/PastiiJay/klbf-lab/pull/41) | DXIL optimiser: folds, loop-invariant hoisting, LDS forwarding, barrier removal | Vladimir (Vladimir-Human) |
 | [rorodev6/victory-nvidia-megafork 77e13a97](https://github.com/rorodev6/victory-nvidia-megafork/commit/77e13a97) | `VICTORY_NAN_SCRUB`, hand-ported; `VICTORY_THIN=0` on NVIDIA (79f36b3) | rorodev6 |
+| [ZigZagBoi1/ScarlettPort PR #44](https://github.com/ZigZagBoi1/ScarlettPort/pull/44) | Refreshes skip write-watch planning under a kept asking | ifBars |
+| [ZigZagBoi1/ScarlettPort PR #72](https://github.com/ZigZagBoi1/ScarlettPort/pull/72) | The write-watch journal finds asked-ahead ranges by binary search | FictionHub |
+| [ZigZagBoi1/ScarlettPort PR #86](https://github.com/ZigZagBoi1/ScarlettPort/pull/86) | Loose windows looked up under the shared lock | aswdffdas-sudo |
+| [TaynanGT/Vice-Tay PR #191](https://github.com/TaynanGT/Vice-Tay/pull/191) | AVX2/SSE2 micro-tile texture detiler and worker pool (1.6-4.6x on large textures) | Vladimir |
 
 The NVIDIA fork watch that finds these lives in the project notes. New ports are added here as they land.
