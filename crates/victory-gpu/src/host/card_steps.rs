@@ -451,8 +451,62 @@ fn elsewhere(does: &[Does], shadow: usize, from: usize, to: usize) -> bool {
 /// write is there: the one they all write it through, or without any the
 /// one shaders would be given.
 fn holder(writers: &[Writer], from: usize, to: usize) -> Result<Arc<Shadow>, &'static str> {
+    holder_among(writers.iter().filter(|w| meet((w.from, w.to), (from, to))), from, to)
+}
+
+/// Whether what flights write is looked through by address
+/// (`VICTORY_HOLDER_INDEX=1`, off by default) instead of all of it for every
+/// step: some 2,800 fills a frame, each against every range the flights in
+/// the air write back, on the submitting thread.
+fn holder_index_on() -> bool {
+    crate::asked_for!("VICTORY_HOLDER_INDEX")
+}
+
+/// The writers of [`holder`], by where they begin, and those added since
+/// (copies done here, a few).
+struct Holders {
+    sorted: Vec<Writer>,
+    /// The furthest end of `sorted[..=i]`.
+    reach: Vec<usize>,
+    added: Vec<Writer>,
+}
+
+impl Holders {
+    fn new(mut writers: Vec<Writer>) -> Self {
+        writers.sort_by_key(|w| w.from);
+        let mut reach = Vec::with_capacity(writers.len());
+        let mut most = 0;
+        for w in &writers {
+            most = most.max(w.to);
+            reach.push(most);
+        }
+        Self { sorted: writers, reach, added: Vec::new() }
+    }
+
+    fn push(&mut self, w: Writer) {
+        self.added.push(w);
+    }
+
+    /// [`holder`] over all of them: the same answer (which of the errors
+    /// may differ where both are).
+    fn holder(&self, from: usize, to: usize) -> Result<Arc<Shadow>, &'static str> {
+        let end = self.sorted.partition_point(|w| w.from < to);
+        let mut i = end;
+        let mut meeting: Vec<&Writer> = Vec::new();
+        while i > 0 && self.reach[i - 1] > from {
+            i -= 1;
+            if meet((self.sorted[i].from, self.sorted[i].to), (from, to)) {
+                meeting.push(&self.sorted[i]);
+            }
+        }
+        meeting.extend(self.added.iter().filter(|w| meet((w.from, w.to), (from, to))));
+        holder_among(meeting.into_iter(), from, to)
+    }
+}
+
+fn holder_among<'a>(meeting: impl Iterator<Item = &'a Writer>, from: usize, to: usize) -> Result<Arc<Shadow>, &'static str> {
     let mut found: Option<&Arc<Shadow>> = None;
-    for w in writers.iter().filter(|w| meet((w.from, w.to), (from, to))) {
+    for w in meeting {
         match (&w.shadow, found) {
             (None, _) => return Err("a read-back or a value behind a flight is written there"),
             (Some(s), Some(f)) if !Arc::ptr_eq(s, f) => return Err("flights write it through two host copies"),
@@ -1056,6 +1110,11 @@ impl Host {
             }));
             all
         };
+        let mut index = holder_index_on().then(|| Holders::new(std::mem::take(&mut writers)));
+        let holder = |writers: &[Writer], index: &Option<Holders>, from: usize, to: usize| match index {
+            Some(index) => index.holder(from, to),
+            None => holder(writers, from, to),
+        };
         let mut ops: Vec<Op> = Vec::with_capacity(chosen.len());
         // The places read (host copy, address, bytes, level): where in the
         // buffer between their bytes are.
@@ -1078,7 +1137,7 @@ impl Host {
             let from = match held.get(&(src, len)) {
                 Some(from) => from.clone(),
                 None => {
-                    let from = holder(&writers, src, src + len)?;
+                    let from = holder(&writers, &index, src, src + len)?;
                     held.insert((src, len), from.clone());
                     from
                 }
@@ -1101,7 +1160,7 @@ impl Host {
             };
             let to = match does[i] {
                 Does::Copy { .. } => {
-                    let to = holder(&writers, dst, dst + len)?;
+                    let to = holder(&writers, &index, dst, dst + len)?;
                     if elsewhere(&does, Arc::as_ptr(&to) as usize, dst, dst + len) {
                         return Err("another host copy of what it writes is read");
                     }
@@ -1110,12 +1169,16 @@ impl Host {
                     }
                     // What the steps behind it read of it is in that host
                     // copy, or nowhere.
-                    writers.push(Writer {
+                    let added = Writer {
                         shadow: Some(to.clone()),
                         from: dst,
                         to: dst + len,
                         copy: true,
-                    });
+                    };
+                    match &mut index {
+                        Some(index) => index.push(added),
+                        None => writers.push(added),
+                    }
                     held.clear();
                     To::Copy(to, dst)
                 }

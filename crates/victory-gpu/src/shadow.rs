@@ -1609,9 +1609,20 @@ fn spin(there: impl Fn() -> bool) {
     }
 }
 
-/// How many threads are kept for [`wide`].
+/// How many threads are kept for [`wide`]: a quarter of the logical
+/// processors, 2 to 6 (4 on an 8-core, 16-thread processor), or
+/// `VICTORY_WIDE_THREADS` (1 to 15). In session 28 the refreshes' work was
+/// 125 ms of all threads in 36 ms of the submitting thread's: about 3.5 of
+/// the 5 threads (these and the submitting one) busy at once.
 fn wide_threads() -> usize {
-    std::thread::available_parallelism().map_or(4, |n| n.get() / 4).clamp(2, 6)
+    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THREADS.get_or_init(|| {
+        std::env::var("VICTORY_WIDE_THREADS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map(|n| n.clamp(1, 15))
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get() / 4).clamp(2, 6))
+    })
 }
 
 fn workers() -> &'static Workers {
