@@ -30,6 +30,10 @@
 //!   started plays on unheard; `VICTORY_LOAD_COVER_MUTE=0`: not muted).
 //!   `VICTORY_LOAD_COVER_HOLD=0`: a gray picture only, the game going on.
 //!
+//! - Once (the default): only the first time it goes up in a run, the
+//!   game's first big load; never again after it lifts.
+//!   `VICTORY_LOAD_COVER_ONCE=0`: at every load spike.
+//!
 //! Only draws whose pipeline is on its way count: pipelines that failed to
 //! translate drop their draws every frame and are left out of this.
 
@@ -53,6 +57,14 @@ const STRAGGLERS: u64 = 2;
 pub(crate) fn color() -> [f32; 4] {
     if hold() { [0.0, 0.0, 0.0, 1.0] } else { [0.2, 0.2, 0.2, 1.0] }
 }
+
+fn once() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_LOAD_COVER_ONCE").is_none_or(|v| v != "0"))
+}
+
+/// It went up and lifted once (with [`once`]: never up again).
+static DONE: AtomicBool = AtomicBool::new(false);
 
 fn hold() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -152,13 +164,18 @@ static STATE: Mutex<Option<State>> = Mutex::new(None);
 /// Whether this present is covered; call once per present.
 pub(crate) fn this_present() -> bool {
     let waiting = crate::pipeline::take_not_made_yet();
+    if DONE.load(Ordering::Relaxed) && once() {
+        return false;
+    }
     let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let s = s.get_or_insert_with(State::default);
     // Held, the frame after the hold was made with what it waited for.
     let quiet = if hold() { 1 } else { QUIET };
     let up = step_with(s, waiting, threshold(), longest(), Instant::now(), quiet);
     *UP_SINCE.lock().unwrap_or_else(|e| e.into_inner()) = s.up;
-    UP.store(up, Ordering::Relaxed);
+    if UP.swap(up, Ordering::Relaxed) && !up {
+        DONE.store(true, Ordering::Relaxed);
+    }
     up
 }
 
