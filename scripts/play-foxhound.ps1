@@ -34,7 +34,10 @@ param(
     # Frames begin every 1/Fps s whatever the title asks (it asks 1/30). 1000, the default: no cap, a frame
     # begins as soon as the last is done. 30: the title's own rate.
     [ValidateRange(1, 1000)][int]$Fps = 1000,
-    [hashtable]$More = @{}
+    [hashtable]$More = @{},
+    # The same as -More, as one string: 'NAME=value;NAME2=value2'. It works where a hashtable cannot be passed, such as
+    # powershell -ExecutionPolicy Bypass -File .\scripts\play-foxhound.ps1 -Exe ... -Set 'VICTORY_SHADER_SAVE=E:\sensaroq\shaders'
+    [string]$Set = ''
 )
 $repo = Split-Path $PSScriptRoot -Parent
 # Windows' commit limit (RAM plus the page file). The title reserves memory as a console does, and with the layer's
@@ -98,6 +101,10 @@ $settings = @{
     VICTORY_LEAVE_OUT = '02384a60fda6f2d0,731a39171b568298'
     # Pipelines the title makes are written down, so `victory warm` can make them ahead
     VICTORY_PIPELINE_BOOK = '1'
+    # Draws whose pipeline the driver is still making: waited for at most 50 ms a frame in all, then left out for
+    # that frame. The layer's own default, 500 ms, held cutscene starts and new areas at 1.9 fps for minutes while
+    # some 1,000 new pipelines were made at 3-5 a second, and ~70 draws a frame were left out anyway (run 221248).
+    VICTORY_PIPELINE_WAIT_MS = '50'
 }
 if (-not $SeriesS) {
     if ($Res -eq '1440') { $settings.VICTORY_NATIVE_1440P = '1' }
@@ -127,6 +134,9 @@ foreach ($k in $menu.Keys) {
     if ($menu[$k]) { $settings[$k] = $menu[$k] } else { $settings.Remove($k) }
 }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
+foreach ($pair in ($Set -split ';')) {
+    if ($pair -match '^\s*([^=]+?)\s*=(.*)$') { $settings[$Matches[1]] = $Matches[2].Trim() }
+}
 $console = if ($SeriesS) { 'series-s' } else { 'series-x' }
 # For the menu: what it shows as the current choices, where it saves, and how it starts the game again
 # (-More is not carried over a restart from the menu).
