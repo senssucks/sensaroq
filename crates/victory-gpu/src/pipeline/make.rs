@@ -36,6 +36,11 @@ pub(crate) struct Pending {
     queue_state: AtomicU8,
     /// Taken by a worker from [`Queue::slow`].
     was_slow: AtomicBool,
+    /// Draws and dispatches that asked for it before it was made: the
+    /// requested list is made most-asked first ([`most_asked_first`]).
+    asks: std::sync::atomic::AtomicU32,
+    /// Counted in [`REQUESTED_LEFT`] until made.
+    counted: AtomicBool,
     made: OnceLock<Option<HostPipeline>>,
     /// What identifies it across runs (shader containers and state), and
     /// whether a draw or dispatch has requested it yet.
@@ -169,6 +174,8 @@ impl Pending {
             graphics,
             queue_state: AtomicU8::new(NOT_QUEUED),
             was_slow: AtomicBool::new(false),
+            asks: std::sync::atomic::AtomicU32::new(0),
+            counted: AtomicBool::new(false),
             made: OnceLock::new(),
             key: key.finalize().to_hex()[..32].to_owned(),
             used: AtomicBool::new(false),
@@ -187,6 +194,9 @@ impl Pending {
             super::library::note_time(&self.key, began.elapsed().as_millis() as u64);
             made
         });
+        if self.counted.swap(false, Ordering::Relaxed) {
+            REQUESTED_LEFT.fetch_sub(1, Ordering::Relaxed);
+        }
         let (lock, done) = &DONE;
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         done.notify_all();
@@ -329,6 +339,23 @@ pub(crate) fn take_left_out() -> u64 {
     LEFT_OUT.swap(0, Ordering::Relaxed)
 }
 
+/// Draws and dispatches that went without their pipeline because it was
+/// still being made (not because it failed), since [`take_not_made_yet`].
+static NOT_MADE_YET: AtomicU64 = AtomicU64::new(0);
+
+/// Pipelines a draw or dispatch asked for that are not made yet.
+static REQUESTED_LEFT: AtomicU64 = AtomicU64::new(0);
+
+/// See [`REQUESTED_LEFT`] (for the loading cover's hold, `cover.rs`).
+pub(crate) fn requested_left() -> u64 {
+    REQUESTED_LEFT.load(Ordering::Relaxed)
+}
+
+/// See [`NOT_MADE_YET`] (for the loading cover, `cover.rs`).
+pub(crate) fn take_not_made_yet() -> u64 {
+    NOT_MADE_YET.swap(0, Ordering::Relaxed)
+}
+
 /// Pipelines queued and not made yet (for the frame line).
 pub(crate) fn waiting() -> u64 {
     WAITING.load(Ordering::Relaxed)
@@ -347,8 +374,12 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
         super::library::note_used(&p.key);
     }
     if p.made.get().is_none() {
+        p.asks.fetch_add(1, Ordering::Relaxed);
         start(p, REQUESTED);
         wait(p, crate::frame::current());
+        if p.made.get().is_none() {
+            NOT_MADE_YET.fetch_add(1, Ordering::Relaxed);
+        }
     }
     p.made.get()?.as_ref()
 }
@@ -453,6 +484,39 @@ fn wait(p: &Pending, frame: u64) {
     );
 }
 
+/// Whether the requested list is made most-asked first: the pipeline that
+/// the most draws are waiting for (the ground, the characters, the trees,
+/// what fills the screen) before one a single small draw wants, so the
+/// main things of a new place show first and the rest fill in after. The
+/// list is scanned ([`MOST_ASKED_SCAN`] at most), as it is short.
+/// `VICTORY_PIPELINE_MOST_ASKED=0`: in the order they were first asked, as
+/// before.
+fn most_asked_first() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_PIPELINE_MOST_ASKED").is_none_or(|v| v != "0"))
+}
+
+/// Requested entries looked at for the most asked one.
+const MOST_ASKED_SCAN: usize = 512;
+
+/// Takes the most asked entry of `list` (the first one on ties), out of
+/// the first [`MOST_ASKED_SCAN`].
+fn pop_most_asked(list: &mut VecDeque<Arc<Pending>>) -> Option<Arc<Pending>> {
+    if !most_asked_first() || list.len() < 2 {
+        return list.pop_front();
+    }
+    let mut best = 0;
+    let mut most = 0;
+    for (i, p) in list.iter().take(MOST_ASKED_SCAN).enumerate() {
+        let asks = p.asks.load(Ordering::Relaxed);
+        if asks > most {
+            most = asks;
+            best = i;
+        }
+    }
+    list.remove(best)
+}
+
 const NOT_QUEUED: u8 = 0;
 const EARLY: u8 = 1;
 const REQUESTED: u8 = 2;
@@ -512,6 +576,9 @@ impl Queue {
             return None;
         }
         p.queue_state.store(priority, Ordering::Relaxed);
+        if priority == REQUESTED && !p.counted.swap(true, Ordering::Relaxed) {
+            REQUESTED_LEFT.fetch_add(1, Ordering::Relaxed);
+        }
         if priority == REQUESTED && p.screen && screens_first() {
             self.screen.push_back(p.clone());
         } else if priority == REQUESTED {
@@ -529,9 +596,9 @@ impl Queue {
         let unclaimed = |list: &mut VecDeque<Arc<Pending>>| {
             std::iter::from_fn(|| list.pop_front()).find(|p| p.queue_state.load(Ordering::Relaxed) == EARLY)
         };
-        let mut p = self.screen.pop_front();
+        let mut p = pop_most_asked(&mut self.screen);
         if p.is_none() && !screens_only {
-            p = self.requested.pop_front().or_else(|| unclaimed(&mut self.early));
+            p = pop_most_asked(&mut self.requested).or_else(|| unclaimed(&mut self.early));
             if p.is_none() && self.slow_now < slow_limit {
                 p = unclaimed(&mut self.slow);
                 if let Some(p) = &p {
@@ -798,5 +865,23 @@ mod tests {
         assert!(Arc::ptr_eq(&queue.pop(true, 1).unwrap(), &screen));
         assert!(queue.pop(true, 1).is_none());
         assert!(Arc::ptr_eq(&queue.pop(false, 1).unwrap(), &world));
+    }
+
+    /// The requested pipeline most draws wait for is made first.
+    #[test]
+    fn most_asked_pipelines_go_first() {
+        let of = |asks| {
+            let p = Pending::new(Vec::new(), None);
+            p.asks.store(asks, Ordering::Relaxed);
+            Arc::new(p)
+        };
+        let (decal, ground, tree) = (of(1), of(400), of(90));
+        let mut queue = Queue::new();
+        for p in [&decal, &ground, &tree] {
+            assert_eq!(queue.push_as(p, REQUESTED, false), Some(true));
+        }
+        assert!(Arc::ptr_eq(&queue.pop(false, 1).unwrap(), &ground));
+        assert!(Arc::ptr_eq(&queue.pop(false, 1).unwrap(), &tree));
+        assert!(Arc::ptr_eq(&queue.pop(false, 1).unwrap(), &decal));
     }
 }

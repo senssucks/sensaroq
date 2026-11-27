@@ -487,6 +487,19 @@ pub(crate) fn take_left_out() -> u64 {
     make::take_left_out()
 }
 
+/// Draws and dispatches that went without a pipeline still being made,
+/// since the last call (the loading cover's measure).
+#[cfg(windows)]
+pub(crate) fn take_not_made_yet() -> u64 {
+    make::take_not_made_yet()
+}
+
+/// Pipelines draws or dispatches asked for that are not made yet.
+#[cfg(windows)]
+pub(crate) fn requested_left() -> u64 {
+    make::requested_left()
+}
+
 /// Draws and dispatches dropped since the last [`take_drops`], by reason
 /// (diagnostics).
 #[cfg(all(windows, feature = "diagnostics"))]
@@ -591,9 +604,14 @@ fn copy(stage: &'static str, code: &Bytecode) -> Option<Arc<Shader>> {
 /// a container's `ACCC` part, and made as the FidelityFX upscaler's
 /// containers are (`victory_shader::native::fspx_program`).
 #[cfg(windows)]
-pub(crate) fn compute_from_pieces(packet: &[u8], hash: &[u8], code: &[u8], meta: &[u8], iid: *const Iid, out: *mut This) -> HRESULT {
+/// `None` if it does not translate: the title is told no, and takes its own
+/// way without it, as it did before these were made (a pipeline handed out
+/// that runs nothing left ~800 a session and a gray picture, 6ea3906).
+pub(crate) fn compute_from_pieces(packet: &[u8], hash: &[u8], code: &[u8], meta: &[u8], iid: *const Iid, out: *mut This) -> Option<HRESULT> {
     let container = fspx_container(&[(0, packet), (1, hash), (6, code), (7, meta)]);
-    hand_out(vec![shader("compute", &container)], None, iid, out)
+    let shader = shader("compute", &container);
+    shader.translated()?;
+    Some(hand_out(vec![shader], None, iid, out))
 }
 
 /// A `DXBC` container of one `ACCC` part holding an `FSPX` blob of
