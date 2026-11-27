@@ -318,4 +318,115 @@ mod tests {
         }
         assert_eq!(XMemFreePhysicalPages(33, pages.as_ptr()), 1);
     }
+
+    /// (KainanP ee8b92e14) Remapping single pages of a large request while
+    /// other memory is made and freed: one section per request against 2 MiB
+    /// sections, no title needed. Ignored: it maps 4 GiB and runs for a
+    /// minute. `cargo test --release -p victory-hle --lib physical_remap_bench
+    /// -- --ignored --nocapture --test-threads=1`; `VICTORY_SECTION_BENCH=<MiB>,
+    /// <seconds>,<rounds>,<pressure MiB>` changes the defaults `4096,10,3,2048`.
+    #[test]
+    #[ignore = "benchmark"]
+    fn physical_remap_bench() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+
+        let knobs: Vec<usize> = std::env::var("VICTORY_SECTION_BENCH")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|v| v.trim().parse().ok())
+            .collect();
+        let knob = |i: usize, default: usize| knobs.get(i).copied().unwrap_or(default);
+        let (mib, seconds, rounds, pressure) = (knob(0, 4096), knob(1, 10), knob(2, 3), knob(3, 2048));
+        let n = mib * MIB / PAGE;
+        let percentile = |v: &mut Vec<f64>, p: usize| {
+            v.sort_by(f64::total_cmp);
+            v[(v.len() * p / 100).min(v.len() - 1)]
+        };
+        let name = |mb: &str| if mb.is_empty() { "one".to_string() } else { format!("{mb} MiB") };
+        let mut results: Vec<(&str, Vec<[f64; 5]>)> = vec![("", vec![]), ("2", vec![])];
+        for round in 0..rounds {
+            for (mb, rows) in &mut results {
+                let pages = allocate_in(n, pages_per_section(Some(mb)));
+                let at = reserve(n);
+                let base = at as usize;
+                // A view a page, each page touched, as the title maps its pool.
+                for (k, page) in pages.iter().enumerate() {
+                    let page_at = (base + k * PAGE) as *mut c_void;
+                    assert_eq!(XMemMapPhysicalPages(page_at, 1, page), page_at);
+                    for b in (0..PAGE).step_by(4096) {
+                        // SAFETY: mapped read-write just now.
+                        unsafe { page_at.cast::<u8>().byte_add(b).write(1) };
+                    }
+                }
+                let stop = AtomicBool::new(false);
+                let mut calls = Vec::new();
+                std::thread::scope(|scope| {
+                    // Another user of memory: made, touched and freed again.
+                    scope.spawn(|| {
+                        while pressure > 0 && !stop.load(Ordering::Relaxed) {
+                            let mut block = vec![0u8; pressure * MIB];
+                            for b in block.iter_mut().step_by(4096) {
+                                *b = 1;
+                            }
+                            std::hint::black_box(&block);
+                        }
+                    });
+                    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+                    let mut next = || {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        seed as usize % n
+                    };
+                    let start = Instant::now();
+                    while start.elapsed() < Duration::from_secs(seconds as u64) {
+                        let (k, page) = (next(), pages[next()]);
+                        let page_at = (base + k * PAGE) as *mut c_void;
+                        let t = Instant::now();
+                        assert_eq!(XMemMapPhysicalPages(page_at, 1, &page), page_at);
+                        calls.push(t.elapsed().as_secs_f64() * 1e6);
+                        // SAFETY: mapped read-write just now.
+                        unsafe { page_at.cast::<u8>().write(2) };
+                    }
+                    stop.store(true, Ordering::Relaxed);
+                });
+                let slow: Vec<f64> = calls.iter().copied().filter(|&us| us >= 1000.0).collect();
+                let row = [
+                    calls.len() as f64 / seconds as f64,
+                    percentile(&mut calls, 50),
+                    percentile(&mut calls, 99),
+                    slow.len() as f64,
+                    slow.iter().sum::<f64>() / 1000.0,
+                ];
+                println!(
+                    "round {round}, sections {}: {:.0} remaps/s, median {:.1} us, p99 {:.1} us, {} of 1 ms or more ({:.0} ms)",
+                    name(mb),
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4]
+                );
+                rows.push(row);
+                assert_eq!(XMemMapPhysicalPages(at, n, std::ptr::null()), at);
+                assert_eq!(XMemFreePhysicalPages(n, pages.as_ptr()), 1);
+            }
+        }
+        for (mb, rows) in &results {
+            let median = |i: usize| {
+                let mut v: Vec<f64> = rows.iter().map(|r| r[i]).collect();
+                percentile(&mut v, 50)
+            };
+            println!(
+                "median of {rounds} rounds, sections {}: {:.0} remaps/s, median {:.1} us, p99 {:.1} us, {} of 1 ms or more ({:.0} ms)",
+                name(mb),
+                median(0),
+                median(1),
+                median(2),
+                median(3),
+                median(4)
+            );
+        }
+    }
 }
