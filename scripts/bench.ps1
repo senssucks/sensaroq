@@ -6,12 +6,15 @@
 #   .\scripts\bench.ps1 -Exe ... -Minutes 6 -Variants '', 'VICTORY_WIDE_SPIN=50', 'VICTORY_TEXTURE_STAGE_MS=50'
 #
 # Each variant is a list of switches, NAME=value separated by ';', put over the launcher's (play-foxhound.ps1 -More).
+# VICTORY_THIN=1 records the title's list calls on eight threads of ours instead of the title's own (findings.md:
+# 75 -> 68 ms a frame on an i9), but washed the scene out on an RTX 5060 Ti in another fork (avatarmanz#112): look at
+# the picture during that run.
 # '' is the launcher as it is. The first minute in the world is left out of the numbers (shaders, streaming).
 # Results go to bench-<time>.txt in the logs folder (%LOCALAPPDATA%\victory\logs) and on screen.
 param(
     [Parameter(Mandatory)][string]$Exe,
     [double]$Minutes = 5,
-    [string[]]$Variants = @('', 'VICTORY_PIPELINE_WORKERS=4', 'VICTORY_WIDE_SPIN=50', 'VICTORY_TEXTURE_STAGE_MS=50'),
+    [string[]]$Variants = @('', 'VICTORY_THIN=1', 'VICTORY_PIPELINE_WORKERS=4', 'VICTORY_WIDE_SPIN=50', 'VICTORY_TEXTURE_STAGE_MS=50'),
     [string[]]$PlayArgs = @()
 )
 $play = Join-Path $PSScriptRoot 'play-foxhound.ps1'
