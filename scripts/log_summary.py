@@ -1,6 +1,6 @@
 """Sums up a play log's frame times, so two runs can be compared by numbers.
 
-    python scripts/log_summary.py <log> [<log> ...] [--min-draws 1000] [--skip-s 60]
+    python scripts/log_summary.py <log> [<log> ...] [--min-draws 1000] [--skip-s 60] [--max-fps 35]
 
 Reads the layer's 5-second lines (`NN fps, NN ms/frame (NN preparing: copies ...`) and the submitting
 thread's breakdown (`preparing per frame, the submitting thread: ...`). Only in-world samples count:
@@ -44,7 +44,7 @@ def pct(values, p):
     return ordered[min(len(ordered) - 1, int(round(p / 100 * (len(ordered) - 1))))]
 
 
-def summarize(path, min_draws, skip_s):
+def summarize(path, min_draws, skip_s, max_fps):
     frames, submits = [], []
     switches = ""
     with open(path, encoding="utf-8", errors="replace") as log:
@@ -61,6 +61,9 @@ def summarize(path, min_draws, skip_s):
         return f"{path}: no in-world samples (none with {min_draws}+ draws a frame)\n"
     start = when(world[0]["t"])
     world = [f for f in world if (when(f["t"]) - start).total_seconds() >= skip_s] or world
+    # The pause menu draws the world behind it at several times the playing rate: not playing.
+    paused = [f for f in world if f["fps"] > max_fps]
+    world = [f for f in world if f["fps"] <= max_fps] or world
     first, last = when(world[0]["t"]), when(world[-1]["t"])
     stamps = {f["t"][:19] for f in world}
     subs = [s for s in submits if s["t"][:19] in stamps] or submits
@@ -72,7 +75,8 @@ def summarize(path, min_draws, skip_s):
     ms = [f["ms"] for f in world]
     out = [
         f"{path}",
-        f"  in world: {len(world)} samples, {(last - first).total_seconds() / 60:.1f} min",
+        f"  in world: {len(world)} samples, {(last - first).total_seconds() / 60:.1f} min"
+        + (f" ({len(paused)} more left out as paused: over {max_fps:g} fps)" if paused else ""),
         f"  fps        median {statistics.median(fps):6.1f}   p10 {pct(fps, 10):6.1f}   p90 {pct(fps, 90):6.1f}",
         f"  ms/frame   median {statistics.median(ms):6.1f}   p90 {pct(ms, 90):6.1f}   p95 {pct(ms, 95):6.1f}   worst {max(ms):7.1f}",
         f"  draws/frame median {med(world, 'draws'):.0f}, dropped without a pipeline {med(world, 'dropped'):.0f}",
@@ -96,10 +100,11 @@ def main():
     parser.add_argument("logs", nargs="+")
     parser.add_argument("--min-draws", type=int, default=1000)
     parser.add_argument("--skip-s", type=float, default=60)
+    parser.add_argument("--max-fps", type=float, default=35, help="samples above this are taken as the pause menu")
     parser.add_argument("--no-switches", action="store_true", help="leave out the switches line")
     args = parser.parse_args()
     for path in args.logs:
-        text = summarize(path, args.min_draws, args.skip_s)
+        text = summarize(path, args.min_draws, args.skip_s, args.max_fps)
         if args.no_switches:
             text = "\n".join(l for l in text.splitlines() if not l.startswith("  # console=")) + "\n"
         sys.stdout.write(text + "\n")

@@ -267,6 +267,22 @@ pub fn run(
             None => println!("frame rate: our clock {ms} ms; the title's own rate (30) left as it is"),
         }
     }
+    // The longest step of game time a frame may take (VICTORY_MAX_STEP_MS,
+    // off without it): the title's 1/15 s slows the game below 15 frames a
+    // second while its sound keeps time.
+    #[cfg(windows)]
+    if execute && let Some(seconds) = victory_loader::step_clamp::asked_seconds() {
+        let size = image.info().size_of_image as usize;
+        // SAFETY: the image stays mapped and nothing of it has run yet.
+        match unsafe { victory_loader::step_clamp::apply(image.base(), size, seconds) } {
+            Ok(()) => {
+                println!("game time: a frame may move game time up to {:.0} ms (the title's own: 67)", seconds * 1000.0);
+            }
+            Err(why) => {
+                println!("game time: the longest step not changed: {why}");
+            }
+        }
+    }
     if !execute {
         println!("not executing (pass --execute to start the title)");
         return Ok(());

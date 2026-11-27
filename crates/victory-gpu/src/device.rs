@@ -369,6 +369,8 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         // SAFETY: the title's out pointer (a local of its own).
         unsafe { *out = std::ptr::null() };
     }
+    #[cfg(windows)]
+    save_pipeline_description(SLOT, calls, desc as usize);
     if calls <= 4 || calls.is_power_of_two() {
         // Sixteen 64-bit words at `at`, read through the kernel: neither
         // pointer is known to be mapped.
@@ -410,6 +412,49 @@ extern "system" fn removed_reason(_: This) -> HRESULT {
         }
     }
     S_OK
+}
+
+/// HybridGt diagnostic, `VICTORY_SAVE_PIPELINES=<dir>`: the first 48 calls of
+/// each of the two unknown pipeline methods write what their description
+/// points at into `dir`, to learn its layout: the description's first 512
+/// bytes, and every (address, size) pair of 64-bit words in its first 32
+/// words whose size is 1 byte to 64 KiB, read through the kernel (nothing
+/// is known to be mapped). The files stay on this machine.
+#[cfg(windows)]
+fn save_pipeline_description(slot: usize, call: u32, desc: usize) {
+    static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let Some(dir) = DIR.get_or_init(|| std::env::var_os("VICTORY_SAVE_PIPELINES").map(std::path::PathBuf::from)) else {
+        return;
+    };
+    if call > 48 || desc == 0 {
+        return;
+    }
+    let read = |at: usize, len: usize| -> Option<Vec<u8>> {
+        let mut bytes = vec![0u8; len];
+        (at != 0 && crate::host::read_into(at as *const u8, &mut bytes)).then_some(bytes)
+    };
+    let _ = std::fs::create_dir_all(dir);
+    let name = |what: &str| dir.join(format!("{slot:03x}-{call:02}-{what}.bin"));
+    let Some(head) = read(desc, 512) else { return };
+    let _ = std::fs::write(name("desc"), &head);
+    let words: Vec<u64> = head
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
+        .collect();
+    for k in 0..31 {
+        let (at, size) = (words[k], words[k + 1]);
+        if at > 0x10000 && (1..=0x10000).contains(&size)
+            && let Some(bytes) = read(at as usize, size as usize)
+        {
+            let _ = std::fs::write(name(&format!("w{k:02}-{at:x}-{size:x}")), &bytes);
+        }
+    }
+    // What the first word points at (an object of ours, if it is one).
+    if let Some(bytes) = read(words[0] as usize, 256) {
+        let _ = std::fs::write(name(&format!("w00-object-{:x}", words[0])), &bytes);
+    }
 }
 
 /// IUnknown 3, object methods 4, device methods 76 (0x18-0x290), then the
