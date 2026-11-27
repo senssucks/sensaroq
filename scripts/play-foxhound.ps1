@@ -109,6 +109,9 @@ $settings = @{
     # that frame. The layer's own default, 500 ms, held cutscene starts and new areas at 1.9 fps for minutes while
     # some 1,000 new pipelines were made at 3-5 a second, and ~70 draws a frame were left out anyway (run 221248).
     VICTORY_PIPELINE_WAIT_MS = '50'
+    # A frame may move game time up to 125 ms, not the title's 67: down to 8 fps the game keeps real time and its
+    # sound stays in step (step_clamp.rs). Higher is kinder to slower PCs; 0 leaves the title's own.
+    VICTORY_MAX_STEP_MS = '125'
 }
 if (-not $SeriesS) {
     if ($Res -eq '1440') { $settings.VICTORY_NATIVE_1440P = '1' }
