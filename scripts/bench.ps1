@@ -11,7 +11,7 @@
 param(
     [Parameter(Mandatory)][string]$Exe,
     [double]$Minutes = 5,
-    [string[]]$Variants = @('', 'VICTORY_WIDE_SPIN=50', 'VICTORY_TEXTURE_STAGE_MS=50'),
+    [string[]]$Variants = @('', 'VICTORY_PIPELINE_WORKERS=4', 'VICTORY_WIDE_SPIN=50', 'VICTORY_TEXTURE_STAGE_MS=50'),
     [string[]]$PlayArgs = @()
 )
 $play = Join-Path $PSScriptRoot 'play-foxhound.ps1'
