@@ -18,9 +18,12 @@ param(
     [Parameter(Mandatory)][string]$Exe,
     [ValidateSet('diag', 'release')][string]$Build = 'release',
     [switch]$SeriesS,
-    # Before the game opens: the shaders the last run drew with are built, those of the place it was left in first,
-    # with a bar, for at most this many minutes (0: not). After an update that changes shaders this fills the cache.
-    [double]$WarmMinutes = 2.5,
+    # Before the game opens a menu asks how long to pre-build shaders: A all the game has ever created, B all ever
+    # drawn with, C those of the last run's last 10 minutes (the place it was left in), D none. -WarmChoice A/B/C/D
+    # answers it ahead (the F1 menu's restarts pass D).
+    [ValidateSet('', 'A', 'B', 'C', 'D')][string]$WarmChoice = '',
+    # At most this many minutes of pre-building, whatever the choice (0: no cap).
+    [double]$WarmMinutes = 0,
     # 1440: output and scene 2560x1440 (Series X, the image is patched); 1080to1440: scene 1920x1080 upscaled by
     # the title; 4k: the stock Series X output (3840x2160).
     [ValidateSet('1440', '1080to1440', '4k')][string]$Res = '1440',
@@ -44,7 +47,9 @@ param(
     # Instead of playing: build ahead, in the driver's cache on disk, the pipelines (shaders) the game has created
     # in earlier runs, with the same settings as a game run. First those earlier runs drew with, then all the rest.
     # Stop it at any time (Ctrl+C); it goes on where it stopped. Once per change of the layer or of the driver.
-    [switch]$Warm
+    [switch]$Warm,
+    # Only the pre-build menu (and the building chosen), then end without starting the game.
+    [switch]$WarmOnly
 )
 $repo = Split-Path $PSScriptRoot -Parent
 # Windows' commit limit (RAM plus the page file). The title reserves memory as a console does, and with the layer's
@@ -162,7 +167,7 @@ $settings.VICTORY_MENU_FRAMEGEN = if ($settings.VICTORY_FRAMEGEN -eq '1') { [str
 $settings.VICTORY_MENU_FPS = [string]$fpsWanted
 $settings.VICTORY_MENU_FILE = $menuFile
 $settings.VICTORY_MENU_PLAY = $MyInvocation.MyCommand.Path
-$settings.VICTORY_MENU_ARGS = "-Exe '$($Exe -replace "'", "''")' -Build $Build$(if ($NoFrameGenReady) { ' -NoFrameGenReady' })$(if ($Set) { " -Set '$($Set -replace "'", "''")'" })"
+$settings.VICTORY_MENU_ARGS = "-Exe '$($Exe -replace "'", "''")' -Build $Build$(if ($NoFrameGenReady) { ' -NoFrameGenReady' })$(if ($Set) { " -Set '$($Set -replace "'", "''")'" }) -WarmChoice D"
 
 $victory = Join-Path $repo "target\$Build\victory.exe"
 if (-not (Test-Path $victory)) {
@@ -188,10 +193,44 @@ if ($Warm) {
     finally { Pop-Location }
     return
 }
-if ($WarmMinutes -gt 0) {
-    Push-Location $repo
-    try { & $victory warm --used --minutes $WarmMinutes } finally { Pop-Location }
+# Seconds as "1h 05m", "4m 10s" or "42s".
+function Format-Span([double]$s) {
+    $s = [math]::Max(0, [math]::Round($s))
+    if ($s -ge 3600) { return '{0}h {1:00}m' -f [math]::Floor($s / 3600), [math]::Floor(($s % 3600) / 60) }
+    if ($s -ge 60) { return '{0}m {1:00}s' -f [math]::Floor($s / 60), ($s % 60) }
+    return "${s}s"
 }
+$choices = [ordered]@{
+    A = @{ Args = @(); Name = 'Build all shaders'; What = 'every shader the game has ever created on this PC, for the whole game so far' }
+    B = @{ Args = @('--used'); Name = 'Build all shaders up to now'; What = "every shader you've ever loaded before" }
+    C = @{ Args = @('--recent', '10'); Name = 'Load shaders for current area'; What = 'the ones loaded in the last 10 minutes of your last playthrough' }
+}
+$pick = $WarmChoice
+if (-not $pick) {
+    Push-Location $repo
+    try {
+        foreach ($k in $choices.Keys) {
+            # "<how many> <seconds>"; nothing if this build cannot count.
+            $line = & $victory warm --count @($choices[$k].Args) 2>$null | Select-Object -Last 1
+            $n, $secs = "$line".Split(' ')
+            $choices[$k].Left = if ($n -match '^\d+$') {
+                if ([int]$n -eq 0) { 'all built already, nothing to do' } else { "$n left, about $(Format-Span ([double]$secs))" }
+            } else { 'time unknown' }
+        }
+    } finally { Pop-Location }
+    Write-Host ''
+    Write-Host 'How long do you want to pre-build shaders?'
+    foreach ($k in $choices.Keys) { Write-Host "  $k. $($choices[$k].Name): $($choices[$k].What) ($($choices[$k].Left))" }
+    Write-Host '  D. Skip: start the game now (shaders build while you play: missing people and black spots for a while)'
+    Write-Host 'Times are estimates from how fast the last pre-build went. Ctrl+C stops a build at any time; it goes on later where it stopped.'
+    do { $pick = (Read-Host 'Pick A, B, C or D (Enter: C)').Trim().ToUpper(); if (-not $pick) { $pick = 'C' } } until ($pick -in 'A', 'B', 'C', 'D')
+}
+if ($pick -ne 'D') {
+    $cap = if ($WarmMinutes -gt 0) { @('--minutes', "$WarmMinutes") } else { @() }
+    Push-Location $repo
+    try { & $victory warm @($choices[$pick].Args) @cap } finally { Pop-Location }
+}
+if ($WarmOnly) { Write-Host 'Pre-building is over; start the game with your usual launcher.'; return }
 $logs = Join-Path $env:LOCALAPPDATA 'victory\logs'; New-Item -ItemType Directory -Force $logs | Out-Null
 $log = Join-Path $logs ('foxhound-{0:yyyyMMdd-HHmmss}.log' -f (Get-Date))
 $writer = [IO.StreamWriter]::new($log, $false, [Text.UTF8Encoding]::new($false)); $writer.AutoFlush = $true

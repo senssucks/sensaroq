@@ -129,6 +129,12 @@ enum Command {
         /// Stop taking new ones after this many minutes.
         #[arg(long)]
         minutes: Option<f64>,
+        /// Only those the last run first drew with in its last this many minutes.
+        #[arg(long)]
+        recent: Option<f64>,
+        /// Only print how many there are to make and the seconds that would take.
+        #[arg(long)]
+        count: bool,
     },
     /// Prepare, map and bind a title executable; with --execute, run it.
     Run {
@@ -236,7 +242,7 @@ fn main() -> Result<()> {
         }
         Command::Shaders { paths, jobs } => translate::precompile(paths, jobs),
         #[cfg(windows)]
-        Command::Warm { jobs, limit, again, used, these, minutes } => warm::run(jobs, limit, again, used, these, minutes),
+        Command::Warm { jobs, limit, again, used, these, minutes, recent, count } => warm::run(jobs, limit, again, used, these, minutes, recent, count),
         Command::Run {
             exe,
             unimplemented,

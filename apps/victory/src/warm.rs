@@ -26,7 +26,7 @@ fn folder() -> Result<PathBuf> {
     Ok(cfg.cache_subdir("shaders")?.with_file_name("pipelines"))
 }
 
-pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, these: Option<String>, minutes: Option<f64>) -> Result<()> {
+pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, these: Option<String>, minutes: Option<f64>, recent_minutes: Option<f64>, count: bool) -> Result<()> {
     let dir = folder()?;
     if let Some(these) = these {
         return make(&dir, &these);
@@ -54,19 +54,41 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     // What the last run drew with last, the latest first: the place the game
     // was left in, where the save goes on.
     let recent = std::fs::read_to_string(dir.join("recent-pipelines.txt")).unwrap_or_default();
-    let recent: std::collections::HashMap<&str, usize> = recent.lines().enumerate().map(|(i, k)| (k, i)).collect();
+    // "<key> <seconds before the end>" (or the key alone, from older runs).
+    let recent: std::collections::HashMap<&str, (usize, u64)> = recent
+        .lines()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            let mut parts = line.split_whitespace();
+            let key = parts.next()?;
+            Some((key, (i, parts.next().and_then(|s| s.parse().ok()).unwrap_or(0))))
+        })
+        .collect();
+    let within = recent_minutes.map(|m| (m.max(0.0) * 60.0) as u64);
     // Those earlier runs drew with first, the others in no order (by key).
     let mut all: Vec<usize> = (0..keys.len())
         .filter(|&n| {
             let key = keys[n].as_str();
-            (again || !done.contains(key)) && !bad.contains(key) && (!used || early.contains(key))
+            (again || !done.contains(key))
+                && !bad.contains(key)
+                && (!used || early.contains(key))
+                && within.is_none_or(|w| recent.get(key).is_some_and(|&(_, age)| age <= w))
         })
         .collect();
     all.sort_by_key(|&n| {
         let key = keys[n].as_str();
-        (recent.get(key).copied().unwrap_or(usize::MAX), !early.contains(key), &keys[n])
+        (recent.get(key).map_or(usize::MAX, |&(i, _)| i), !early.contains(key), &keys[n])
     });
     all.truncate(limit.unwrap_or(usize::MAX));
+    let rate_file = dir.join("warm-rate.txt");
+    if count {
+        // "<how many> <seconds they would take>", for the launcher's menu: at the
+        // rate the last warm made them (pipelines a second), else Skylar's first
+        // measured one (720 in 108 s).
+        let rate = std::fs::read_to_string(&rate_file).ok().and_then(|s| s.trim().parse::<f64>().ok()).filter(|r| *r > 0.0).unwrap_or(6.7);
+        println!("{} {:.0}", all.len(), all.len() as f64 / rate);
+        return Ok(());
+    }
     let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
     let jobs = jobs.unwrap_or(cores * 2 / 3).max(1);
     println!(
@@ -124,6 +146,10 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         println!("time is up: the rest are made while the game runs (and by the next warm)");
     }
     let (mut times, refused, crashed) = state.into_inner().unwrap_or_else(|e| e.into_inner());
+    let spent = began.elapsed().as_secs_f64();
+    if times.len() >= 50 && spent >= 10.0 {
+        let _ = std::fs::write(&rate_file, format!("{:.2}", times.len() as f64 / spent));
+    }
     times.sort_by(f64::total_cmp);
     let at = |q: f64| times.get((times.len() as f64 * q) as usize).copied().unwrap_or(0.0);
     println!(

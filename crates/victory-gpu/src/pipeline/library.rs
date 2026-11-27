@@ -488,8 +488,10 @@ const LIBRARY_FILE: &str = "host-pipelines.bin";
 /// start renames it over the library first ([`Blob::of`]).
 const NEXT_FILE: &str = "host-pipelines.next";
 const EARLY_FILE: &str = "early-pipelines.txt";
-/// The title pipelines this run drew with last, the latest first: what the
-/// place the game was left in needs (`victory warm --used` makes these first).
+/// The title pipelines this run drew with last, the latest first, each with
+/// the seconds before the save it was first drawn with: what the place the
+/// game was left in needs (`victory warm` makes these first; `--recent <min>`
+/// only those).
 const RECENT_FILE: &str = "recent-pipelines.txt";
 /// Pipelines listed in [`RECENT_FILE`], at most.
 const RECENT_MAX: usize = 6000;
@@ -693,7 +695,15 @@ pub(crate) fn save(now: bool) {
         .and_then(|()| write_atomically(&dir.join(EARLY_FILE), used.join("\n").as_bytes()))
         .and_then(|()| {
             // Only from a run that drew: `victory shaders` leaves the list be.
-            let recent: Vec<String> = RECENT.lock().unwrap_or_else(|e| e.into_inner()).iter().rev().cloned().collect();
+            // "<key> <seconds before this save it was first drawn with>".
+            let now = std::time::Instant::now();
+            let recent: Vec<String> = RECENT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .rev()
+                .map(|(key, at)| format!("{key} {}", now.duration_since(*at).as_secs()))
+                .collect();
             if recent.is_empty() { Ok(()) } else { write_atomically(&dir.join(RECENT_FILE), recent.join("\n").as_bytes()) }
         });
     match written {
@@ -801,7 +811,7 @@ pub(crate) fn note_time(key: &str, ms: u64) {
 
 /// Title pipeline keys first requested in this run, in that order (the
 /// last [`RECENT_MAX`]).
-static RECENT: Mutex<std::collections::VecDeque<String>> = Mutex::new(std::collections::VecDeque::new());
+static RECENT: Mutex<std::collections::VecDeque<(String, std::time::Instant)>> = Mutex::new(std::collections::VecDeque::new());
 
 /// Title pipeline keys requested by draws or dispatches (this run and the last).
 static USED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
@@ -841,7 +851,7 @@ pub(crate) fn note_used(key: &str) {
         if recent.len() == RECENT_MAX {
             recent.pop_front();
         }
-        recent.push_back(key.to_owned());
+        recent.push_back((key.to_owned(), std::time::Instant::now()));
     }
     let mut used = used();
     let set = used.get_or_insert_with(HashSet::new);
