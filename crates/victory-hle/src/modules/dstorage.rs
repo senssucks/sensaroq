@@ -561,6 +561,9 @@ struct Lanes {
     /// running them.
     done: (u64, u64, std::time::Duration),
     refused: u64,
+    /// Since the last summary: requests that failed, and the slowest one.
+    failed: u64,
+    slowest: std::time::Duration,
     /// BCPack bytes written and time spent on them.
     bcpack: (u64, std::time::Duration),
     since: Option<std::time::Instant>,
@@ -620,6 +623,8 @@ fn scheduler() -> Option<&'static Scheduler> {
                     lane_now: [0; 3],
                     done: Default::default(),
                     refused: 0,
+                    failed: 0,
+                    slowest: Default::default(),
                     bcpack: Default::default(),
                     since: None,
                 }),
@@ -792,8 +797,9 @@ fn work(scheduler: &'static Scheduler) {
             traced.end(&job, &result);
         }
         lanes = scheduler.lock();
+        let failed = result.is_err();
         lanes.finish(&job, result);
-        lanes.count(&job, started);
+        lanes.count(&job, started, failed);
         if std::mem::take(&mut lanes.starved) {
             scheduler.work.notify_all();
         }
@@ -802,12 +808,19 @@ fn work(scheduler: &'static Scheduler) {
 }
 
 impl Lanes {
-    /// Counts a finished request; every 5 s a debug line sums them up.
-    fn count(&mut self, job: &Job, started: std::time::Instant) {
+    /// Counts a finished request; every 5 s a line sums them up, at info
+    /// level so that a plain session log shows whether the world's streaming
+    /// keeps up (`VICTORY_DSTORAGE_STATS=0`: debug level, as before). A
+    /// world that stays the fog colour while `waiting` grows or `failed` is
+    /// not zero is starved of its data, not of its shaders.
+    fn count(&mut self, job: &Job, started: std::time::Instant, failed: bool) {
+        let took = started.elapsed();
+        self.failed += u64::from(failed);
+        self.slowest = self.slowest.max(took);
         let (requests, bytes, busy) = &mut self.done;
         *requests += 1;
         *bytes += u64::from(job.request.destination_size);
-        *busy += started.elapsed();
+        *busy += took;
         if job.request.options & BCPACK != 0 {
             self.bcpack.0 += u64::from(job.request.destination_size);
             self.bcpack.1 += started.elapsed();
@@ -817,8 +830,14 @@ impl Lanes {
         if elapsed.as_secs() >= 5 {
             let waiting: usize = self.lanes.values().map(|l| l.reads.len()).sum();
             let reading = READING.swap(0, Ordering::Relaxed) as f64 / 1e9;
-            tracing::debug!(
+            static INFO: OnceLock<bool> = OnceLock::new();
+            let info = *INFO.get_or_init(|| std::env::var("VICTORY_DSTORAGE_STATS").map_or(true, |v| v.trim() != "0"));
+            macro_rules! summary {
+                ($level:ident) => {
+                    tracing::$level!(
                 requests = *requests,
+                failed = self.failed,
+                slowest_ms = self.slowest.as_millis() as u64,
                 mb_per_s = format_args!("{:.1}", *bytes as f64 / elapsed.as_secs_f64() / 1e6),
                 busy_workers = format_args!("{:.2}", busy.as_secs_f64() / elapsed.as_secs_f64()),
                 reading_workers = format_args!("{:.2}", reading / elapsed.as_secs_f64()),
@@ -828,7 +847,16 @@ impl Lanes {
                 waiting,
                 "dstorage: last {:.1} s",
                 elapsed.as_secs_f64()
-            );
+                    )
+                };
+            }
+            if info {
+                summary!(info);
+            } else {
+                summary!(debug);
+            }
+            self.failed = 0;
+            self.slowest = Default::default();
             self.done = Default::default();
             self.bcpack = Default::default();
             self.since = None;
