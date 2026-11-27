@@ -548,7 +548,11 @@ pub(crate) fn submissions() -> (u64, u64) {
 
 /// Drops `object` once every submission running now has finished: at once
 /// if none is.
+/// What [`retire`] was given since the last memory line, by type.
+static RETIRED_KINDS: Mutex<Option<std::collections::HashMap<&'static str, u64>>> = Mutex::new(None);
+
 pub(crate) fn retire<T: 'static>(object: T) {
+    *RETIRED_KINDS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().entry(std::any::type_name::<T>()).or_default() += 1;
     // (Those the title made and the host has not begun get the next numbers.)
     let queued = crate::queue::queued();
     let started = STARTED.load(Ordering::Acquire) + queued;
@@ -597,7 +601,30 @@ fn bury_lag() -> u64 {
 /// Drops what waited for submissions up to `finished` ([`bury_lag`]). The
 /// numbers come in order within each thread's shard.
 fn bury(finished: u64) {
-    drop(unburied(finished));
+    drop_buried(unburied(finished));
+}
+
+/// Since the last memory line: objects dropped after their submissions
+/// (boxed, resources), and nanoseconds of dropping them, on whichever thread.
+static BURIED: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+fn drop_buried(done: Vec<(u64, Retired)>) {
+    if done.is_empty() {
+        return;
+    }
+    let began = std::time::Instant::now();
+    let boxed = done.iter().filter(|(_, r)| matches!(r, Retired::Any(_))).count() as u64;
+    BURIED[0].fetch_add(boxed, Ordering::Relaxed);
+    BURIED[1].fetch_add(done.len() as u64 - boxed, Ordering::Relaxed);
+    drop(done);
+    BURIED[2].fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
+}
+
+/// The objects dropped after their submissions since the last call, and the
+/// milliseconds that took: (boxed, resources, ms).
+pub(crate) fn take_buried() -> (u64, u64, f64) {
+    let [a, b, ns] = BURIED.each_ref().map(|n| n.swap(0, Ordering::Relaxed));
+    (a, b, ns as f64 / 1e6)
 }
 
 /// What waited for submissions up to `finished` ([`bury_lag`]), taken out
@@ -640,7 +667,7 @@ fn bury_aside(finished: u64) {
             .name("victory-bury".into())
             .spawn(move || {
                 for done in from {
-                    drop(done);
+                    drop_buried(done);
                 }
             })
             .ok()
@@ -650,10 +677,10 @@ fn bury_aside(finished: u64) {
         Some(to) => {
             // (No thread to take them: dropped here.)
             if let Err(e) = to.lock().unwrap_or_else(|e| e.into_inner()).send(done) {
-                drop(e.0);
+                drop_buried(e.0);
             }
         }
-        None => drop(done),
+        None => drop_buried(done),
     }
 }
 
@@ -10050,6 +10077,21 @@ impl Meter {
                             ms(whole.saturating_sub(gather + between + take)),
                             ms(placed)
                         );
+                    }
+                    let (boxed, resources, buried_ms) = take_buried();
+                    if since > 0.0 && boxed + resources > 0 {
+                        tracing::info!(
+                            "objects dropped after their submissions, last {since:.0} s: {boxed} of ours (host copies, textures, \
+                             lists) and {resources} resources slots showed, {buried_ms:.0} ms dropping them (VICTORY_BURY_ASIDE=1: \
+                             on a thread of their own, else in the landing)"
+                        );
+                    }
+                    let kinds = RETIRED_KINDS.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
+                    if since > 0.0 && !kinds.is_empty() {
+                        let mut kinds: Vec<_> = kinds.into_iter().collect();
+                        kinds.sort_by_key(|k| std::cmp::Reverse(k.1));
+                        let said: Vec<String> = kinds.iter().take(6).map(|(t, n)| format!("{n} {}", t.rsplit("::").next().unwrap_or(t))).collect();
+                        tracing::info!("let go to be dropped after their submissions, last {since:.0} s, by kind: {}", said.join(", "));
                     }
                     let making = take_making();
                     if !making.is_empty() && since > 0.0 {
