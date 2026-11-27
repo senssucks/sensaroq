@@ -63,6 +63,15 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [PR #127](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/127) | A submission's one asking begun beside its first steps (`VICTORY_ASK_FIRST`, off by default) | 1mosce |
 | [PR #139](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/139) | Retired objects in sixteen queues (`VICTORY_RETIRED_SHARDS`, off by default here); the kept-thread count settable (`VICTORY_WIDE_THREADS`) | dcastell1 |
 | [PR #126](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/126) | Refreshes handed to the kept threads several at a time (`VICTORY_WIDE_CHUNK`) | 1mosce |
+| [PR #328](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/328) | Ray walkers reuse a 64 KiB page's lookup (`VICTORY_MEMORY_NEAR`, off by default here), from fxceless 299fba | wike1701 |
+| [PR #326](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/326) | Water tile slots a lane on 32-lane cards, scalar loop skips kept, one more water program wave-wide (`VICTORY_WATER_TILE_SLOTS`, `VICTORY_WAVE_LOOP_SKIPS`, `VICTORY_WATER_PORTALS_WIDE`, all off by default here) | wike1701 |
+| [PR #358](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/358) | Independent card maintenance jobs batched (`VICTORY_MAINTENANCE_BATCHES`, off by default) | krofty |
+
+### stellarr-studio/kelvaroq (native patches)
+
+| Source | What | Author |
+|---|---|---|
+| [0022-gpu-upload-inputs](https://github.com/stellarr-studio/kelvaroq/blob/main/native/patches/0022-gpu-upload-inputs.patch) | Shader inputs only the CPU writes in card memory the CPU maps (`VICTORY_GPU_UPLOAD_READONLY_MB`, off by default), re-done on our mapped card buffers | stellarr-studio |
 
 ### xcl-dev/xcl (ideas only, re-written; XCL is GPL-2.0-only)
 
