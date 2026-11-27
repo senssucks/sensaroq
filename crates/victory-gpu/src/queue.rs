@@ -928,6 +928,10 @@ extern "system" fn present(
     #[cfg(all(windows, feature = "diagnostics"))]
     crate::copystat::present_begins();
     let called = crate::timeline::span("the title's Present");
+    // The loading cover's hold (`cover.rs`): the game stands still here
+    // while the pipelines its last frame waited for are made.
+    #[cfg(windows)]
+    crate::cover::hold_title();
     #[cfg(all(windows, feature = "diagnostics"))]
     crate::timeline::title_thread();
     // Submissions sent to the card and not waited for are settled first,

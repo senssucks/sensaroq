@@ -39,6 +39,8 @@ pub(crate) struct Pending {
     /// Draws and dispatches that asked for it before it was made: the
     /// requested list is made most-asked first ([`most_asked_first`]).
     asks: std::sync::atomic::AtomicU32,
+    /// Counted in [`REQUESTED_LEFT`] until made.
+    counted: AtomicBool,
     made: OnceLock<Option<HostPipeline>>,
     /// What identifies it across runs (shader containers and state), and
     /// whether a draw or dispatch has requested it yet.
@@ -173,6 +175,7 @@ impl Pending {
             queue_state: AtomicU8::new(NOT_QUEUED),
             was_slow: AtomicBool::new(false),
             asks: std::sync::atomic::AtomicU32::new(0),
+            counted: AtomicBool::new(false),
             made: OnceLock::new(),
             key: key.finalize().to_hex()[..32].to_owned(),
             used: AtomicBool::new(false),
@@ -191,6 +194,9 @@ impl Pending {
             super::library::note_time(&self.key, began.elapsed().as_millis() as u64);
             made
         });
+        if self.counted.swap(false, Ordering::Relaxed) {
+            REQUESTED_LEFT.fetch_sub(1, Ordering::Relaxed);
+        }
         let (lock, done) = &DONE;
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         done.notify_all();
@@ -336,6 +342,14 @@ pub(crate) fn take_left_out() -> u64 {
 /// Draws and dispatches that went without their pipeline because it was
 /// still being made (not because it failed), since [`take_not_made_yet`].
 static NOT_MADE_YET: AtomicU64 = AtomicU64::new(0);
+
+/// Pipelines a draw or dispatch asked for that are not made yet.
+static REQUESTED_LEFT: AtomicU64 = AtomicU64::new(0);
+
+/// See [`REQUESTED_LEFT`] (for the loading cover's hold, `cover.rs`).
+pub(crate) fn requested_left() -> u64 {
+    REQUESTED_LEFT.load(Ordering::Relaxed)
+}
 
 /// See [`NOT_MADE_YET`] (for the loading cover, `cover.rs`).
 pub(crate) fn take_not_made_yet() -> u64 {
@@ -562,6 +576,9 @@ impl Queue {
             return None;
         }
         p.queue_state.store(priority, Ordering::Relaxed);
+        if priority == REQUESTED && !p.counted.swap(true, Ordering::Relaxed) {
+            REQUESTED_LEFT.fetch_add(1, Ordering::Relaxed);
+        }
         if priority == REQUESTED && p.screen && screens_first() {
             self.screen.push_back(p.clone());
         } else if priority == REQUESTED {

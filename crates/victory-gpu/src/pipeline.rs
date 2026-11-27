@@ -494,6 +494,12 @@ pub(crate) fn take_not_made_yet() -> u64 {
     make::take_not_made_yet()
 }
 
+/// Pipelines draws or dispatches asked for that are not made yet.
+#[cfg(windows)]
+pub(crate) fn requested_left() -> u64 {
+    make::requested_left()
+}
+
 /// Draws and dispatches dropped since the last [`take_drops`], by reason
 /// (diagnostics).
 #[cfg(all(windows, feature = "diagnostics"))]
