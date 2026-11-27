@@ -151,6 +151,13 @@ pub(crate) struct Translated {
 
 #[cfg(windows)]
 impl Shader {
+    /// The program translated once more with the translator's passes
+    /// `passes` (`victory_shader::emit::with_shader_opt`), not cached: for a
+    /// pipeline the driver refused. `None` if it does not translate.
+    pub(crate) fn translated_with(&self, passes: u32) -> Option<victory_shader::emit::HostShader> {
+        victory_shader::emit::with_shader_opt(passes, || victory_shader::emit::translate(&self.container)).ok()
+    }
+
     /// The translation, made on first use; a shader that does not
     /// translate is logged once.
     pub(crate) fn translated(&self) -> Option<&Translated> {

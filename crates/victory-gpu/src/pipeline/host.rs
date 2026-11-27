@@ -631,7 +631,51 @@ impl HostPipeline {
                 Err(e) => {
                     tracing::warn!(error = %e, ?shaders, "host pipeline refused");
                     host.log_messages();
-                    return None;
+                    // The driver's compiler fails on some translations (one
+                    // compute program, 7f61193d2c0e5f22, every run on an
+                    // RTX 5060 Ti, with an int3 in nvgpucomp64.dll, reported
+                    // as out of memory): the same program translated with
+                    // other passes, which bind the same, is tried instead
+                    // (`VICTORY_REFUSED_RETRY=0`: not).
+                    let first = stages.first().and_then(|(s, _)| s.translated()).map(|t| &t.host)?;
+                    let same_binding = |other: &victory_shader::emit::HostShader| {
+                        let (mut a, mut b) = (first.clone(), other.clone());
+                        a.dxil.clear();
+                        b.dxil.clear();
+                        a == b
+                    };
+                    if !crate::toggled!("VICTORY_REFUSED_RETRY") {
+                        return None;
+                    }
+                    let shader = &stages.first()?.0;
+                    let mut retried = None;
+                    for passes in [0u32, 1, 127] {
+                        let Some(other) = shader.translated_with(passes) else { continue };
+                        if other.dxil == first.dxil || !same_binding(&other) {
+                            continue;
+                        }
+                        let desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                            // SAFETY: a borrowed pointer the description never releases.
+                            pRootSignature: unsafe { std::mem::transmute_copy(&root) },
+                            CS: D3D12_SHADER_BYTECODE {
+                                pShaderBytecode: other.dxil.as_ptr().cast(),
+                                BytecodeLength: other.dxil.len(),
+                            },
+                            ..Default::default()
+                        };
+                        // SAFETY: the description points at live data.
+                        let made: windows::core::Result<ID3D12PipelineState> =
+                            unsafe { host.device.CreateComputePipelineState(&desc) };
+                        match made {
+                            Ok(pso) => {
+                                tracing::info!(passes, ?shaders, "host pipeline made from a translation with other passes");
+                                retried = Some(pso);
+                                break;
+                            }
+                            Err(e) => tracing::warn!(passes, error = %e, ?shaders, "host pipeline refused again"),
+                        }
+                    }
+                    retried?
                 }
             };
             tracing::info!(?shaders, "host pipeline");

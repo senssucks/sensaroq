@@ -283,6 +283,20 @@ pub fn builder_bounds() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_BOUNDS").is_none_or(|v| v != "0"))
 }
 
+thread_local! {
+    static OPT_OVERRIDE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `f` with [`shader_opt`] answering `passes` on this thread: for a
+/// translation made once more with other passes, when the host's driver
+/// refused the first one (a translation made so is not the cache's).
+pub fn with_shader_opt<T>(passes: u32, f: impl FnOnce() -> T) -> T {
+    let before = OPT_OVERRIDE.with(|o| o.replace(Some(passes)));
+    let out = f();
+    OPT_OVERRIDE.with(|o| o.set(before));
+    out
+}
+
 /// The clean-up passes that run over a translated program before it is
 /// written (`bitcode::opt`): a set of that module's pass bits. Every pass
 /// is exact, so the switch is for telling a translator fault from a
@@ -301,6 +315,9 @@ pub fn builder_bounds() -> bool {
 /// Part of the translation: the shader cache keys on it (`victory-gpu`'s
 /// does).
 pub fn shader_opt() -> u32 {
+    if let Some(passes) = OPT_OVERRIDE.with(std::cell::Cell::get) {
+        return passes;
+    }
     static PASSES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *PASSES.get_or_init(|| parse_shader_opt(std::env::var("VICTORY_SHADER_OPT").ok().as_deref()))
 }
