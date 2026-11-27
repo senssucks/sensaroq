@@ -37,6 +37,20 @@ param(
     [hashtable]$More = @{}
 )
 $repo = Split-Path $PSScriptRoot -Parent
+# Windows' commit limit (RAM plus the page file). The title reserves memory as a console does, and with the layer's
+# own copies a run can need more than 32 GB of RAM and a small page file hold: an allocation then fails and the
+# title writes through a null pointer (a 0xc0000005 "write 0x0" crash a minute or two into loading, with
+# "available_commit_mib" of a few GB in the log's memory pressure line). Warn below 64 GB.
+try {
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+    $commitGb = [math]::Round($os.TotalVirtualMemorySize / 1MB, 1)
+    $ramGb = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
+    if ($commitGb -lt 64) {
+        Write-Warning ("Windows can commit only $commitGb GB (RAM $ramGb GB plus the page file). Loading the world " +
+            "can run out and crash. Set the page file to at least $([math]::Ceiling(64 - $ramGb)) GB on an SSD: " +
+            "System > About > Advanced system settings > Performance Settings > Advanced > Virtual memory > Change.")
+    }
+} catch { }
 # What the F1 menu saved: its own choices (VICTORY_MENU_...) stand in for this script's options, and its
 # switches go over the settings below. An empty value unsets a switch.
 $menuFile = Join-Path $repo 'victory-settings.txt'
