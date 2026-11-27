@@ -8223,7 +8223,8 @@ fn submit_split_line(frames: f64) {
          the refreshes' work, all threads: {:.1} asking whether a copy has anything new, {:.1} bringing copies up to date; \
          in the lists' steps besides: {:.1} steps of ours, {:.1} ranges shaders write (their copy's refresh first), {:.1} \
          textures, {:.1} preludes and gathering the lists; \
-         faults taken in memory we watch, all threads: {:.0} ({:.2} ms in the handler); refreshes copied {:.1} MB as \
+         faults taken in memory we watch, all threads: {:.0} ({:.2} ms in the handler: {:.2} waiting for the guards' lock, \
+         {:.0} opened under it, {:.0} without it with {:.2} ms waiting for another thread opening, VICTORY_FAULT_UNLOCKED); refreshes copied {:.1} MB as \
          watched and {:.1} MB whole in {:.0} copies not watched",
         ms[0],
         ms[8],
@@ -8256,6 +8257,10 @@ fn submit_split_line(frames: f64) {
         other[3],
         handled[0] as f64 / frames,
         handled[1] as f64 / 1e6 / frames,
+        handled[2] as f64 / 1e6 / frames,
+        handled[3] as f64 / frames,
+        handled[4] as f64 / frames,
+        handled[5] as f64 / 1e6 / frames,
         refreshed[0] as f64 / 1e6 / frames,
         refreshed[1] as f64 / 1e6 / frames,
         refreshed[2] as f64 / frames,

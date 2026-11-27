@@ -3111,11 +3111,11 @@ pub fn title_memory_made_real(at: usize, len: usize) {
 /// (guarded blocks opened, lazily mapped memory mapped, copies of ours
 /// failing), and nanoseconds in it, of all threads (the title's mostly):
 /// each also costs the system's dispatch, some microseconds, not counted.
-static HANDLED: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+static HANDLED: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
 
 /// See [`HANDLED`], since the last call.
-pub(crate) fn take_handled() -> [u64; 2] {
-    [0, 1].map(|i| HANDLED[i].swap(0, std::sync::atomic::Ordering::Relaxed))
+pub(crate) fn take_handled() -> [u64; 6] {
+    std::array::from_fn(|i| HANDLED[i].swap(0, std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Registers the handler that takes writes to guarded blocks, once, ahead
@@ -3192,6 +3192,7 @@ pub(crate) fn install() {
         }
         if unlocked() && PROTECTED.any(block, block + 1) {
             if open_unlocked(block) {
+                HANDLED[4].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 #[cfg(feature = "diagnostics")]
                 {
                     crate::copystat::add(crate::copystat::C::GuardFaults, 1);
@@ -3204,6 +3205,7 @@ pub(crate) fn install() {
             let began = std::time::Instant::now();
             while OPENING.any(block, block + 1) && began.elapsed().as_micros() < 100 {
                 if writable(at) {
+                    HANDLED[5].fetch_add(began.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                     #[cfg(feature = "diagnostics")]
                     crate::faultbook::note(crate::faultbook::What::Open, block, began.elapsed().as_nanos() as usize, 0);
                     return EXCEPTION_CONTINUE_EXECUTION;
@@ -3212,6 +3214,7 @@ pub(crate) fn install() {
                     std::hint::spin_loop();
                 }
             }
+            HANDLED[5].fetch_add(began.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             #[cfg(feature = "diagnostics")]
             FAULTS[5].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -3225,15 +3228,15 @@ pub(crate) fn install() {
                 crate::faultbook::note(crate::faultbook::What::Open, block, 0, 0);
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
-            #[cfg(feature = "diagnostics")]
             let began = std::time::Instant::now();
             // (Let go again before the next look: the runtime wants the
             // guards to end a change.)
             let mut g = guards();
-            #[cfg(feature = "diagnostics")]
             let waited = began.elapsed();
+            HANDLED[2].fetch_add(waited.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
             let opened = open(&mut g, at, at + 1);
             if opened != 0 {
+                HANDLED[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 g.opened(block);
                 drop(g);
                 #[cfg(feature = "diagnostics")]
