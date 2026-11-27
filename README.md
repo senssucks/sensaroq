@@ -4,17 +4,45 @@
 
 # VIctory on NVIDIA
 
-> **Before you play**
->
-> - **You must install DLSS yourself:** run `Get-NVIDIA-DLSS.cmd` once (it is
->   in this folder; a double click does it), or have your AI assistant run it
->   for you. It downloads NVIDIA's DLSS and frame generation files, about 70 MB,
->   from NVIDIA's own GitHub; they are not part of this repository. Without
->   them the game still runs, with its own upscaling and no frame generation.
-> - **F1 in the game brings up the settings menu** (arrow keys pick and
->   change, Enter does it).
->
-> The steps are under [How to run it](#how-to-run-it).
+## Quick start: how to run it
+
+**1. Have these first**
+
+- Windows 10 or 11, 32 GB of RAM or more, an SSD, and an NVIDIA GeForce RTX
+  card with a recent driver.
+- [Rust](https://rustup.rs) and the
+  [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+  with "Desktop development with C++" (the layer is built on your PC the
+  first time you start it).
+- **Your own dump** of the title's Xbox Series build v1.0.2.1: the folder
+  with `game_scarlett_master.exe`. This repository contains no game files.
+
+**2. Run these in PowerShell**
+
+```powershell
+git clone https://github.com/trustno1-coder/VIctory-NVIDIA
+cd VIctory-NVIDIA
+.\Get-NVIDIA-DLSS.cmd
+powershell -ExecutionPolicy Bypass -File scripts\play-nvidia.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe'
+```
+
+- Put the path to **your** `game_scarlett_master.exe` in the last line.
+- `Get-NVIDIA-DLSS.cmd` is needed once. It downloads NVIDIA's DLSS and frame
+  generation files (about 70 MB) from NVIDIA's own GitHub; they are NVIDIA's
+  and are not part of this repository. Skip it and the game still runs, with
+  its own upscaling and no frame generation.
+- The first start builds the layer, which takes a few minutes. After that the
+  last line alone starts the game.
+
+**3. In the game**
+
+- **F1** brings up the settings menu (arrow keys pick and change, Enter does
+  it): DLSS, frame generation, frame rate cap and more.
+- **F3** shows the stats panel (frame rate, frame generation, draws, GPU and
+  memory numbers).
+
+Options, requirements in full and the details are under
+[How to run it](#how-to-run-it).
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
 that runs an Xbox Series title natively on Windows from files **you** supply,
@@ -102,6 +130,15 @@ speed, in the picture and in simply being able to play it:
   cap, console profile, picture size, the light estimates and the main speed
   switches, saved to `victory-settings.txt` and applied at the next start
   ("SAVE AND RESTART NOW" does that for you; lines marked LIVE change at once).
+- **The F3 stats panel**, in every build: frame rate and frame time, frames
+  shown with frame generation, draws, how busy the GPU and the submitting
+  thread are, copies, RAM and VRAM. The menu switches it too.
+- **Open water without dark blocks.** Two of the title's water light programs
+  run on 32-lane cards only in a form that left whole tiles of the sea dark
+  (around boats, along shores, under bridges) and cost about 15 ms of the
+  card a frame. They are left out there: no blocks and 30 fps instead of 25
+  on the first boat ride (RTX 5070), with water that is darker and bluer.
+  WATER LIGHT in the menu (`VICTORY_WATER_LIGHT=1`) runs them again.
 - **One command to play**: the launcher builds the layer the first time and
   applies what the menu saved.
 - **`Get-NVIDIA-DLSS.cmd`**: the eight NVIDIA files that are loaded, about
@@ -115,9 +152,10 @@ speed, in the picture and in simply being able to play it:
   game, built and run on this card before it was merged: ten so far.
 
 Where each of these is today: this fork's own code in this tree is the F1
-menu, frame generation from 2x to 6x with its live switching and memory
-handling, the lifted frame rate cap, the frame rate line, the launcher and the
-NVIDIA file fetcher. The foxhound line carries the descriptor slots, the
+menu, the stats panel in every build, the water light switch, frame
+generation from 2x to 6x with its live switching and memory handling, the
+lifted frame rate cap, the frame rate line, the launcher and the NVIDIA file
+fetcher. The foxhound line carries the descriptor slots, the
 compares on the card, the interface plane and the face network in its own
 form. The black-blob scrub, the graphics card picker and the ray-tracing
 builder path are in this repository's history, and come over as this base
@@ -219,7 +257,7 @@ fork has always had; its options:
 | `-SeriesS` | the Series S profile: 1280x720 inside, faster, softer |
 | `-Res 1080to1440` / `4k` | scene at 1080p upscaled by the title / the stock 3840x2160 output |
 | `-NoFrameGenReady` | frame generation only with `-FrameGen` (it is otherwise made ready at every start, so the menu can switch it) |
-| `-Build diag` | the diagnostics build (slower; captures, timelines, the F3 numbers panel) |
+| `-Build diag` | the diagnostics build (slower; captures, timelines, recording time in the F3 panel) |
 | `-More @{VICTORY_X='1'}` | add or override any switch |
 
 What the F1 menu saved (`victory-settings.txt`) goes over these at every start;
