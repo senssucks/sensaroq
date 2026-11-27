@@ -351,7 +351,7 @@ pub(crate) fn mapped_at(device: &ID3D12Device, at: &'static std::panic::Location
 /// gathering what changed, from there to the taking (hashes made, the
 /// "before"s), taking the bytes out (`send::take`), and the changed ranges
 /// gathered. For the 30 s line: which part to hand to other threads.
-pub(crate) static CARD_BEFORE_NS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+pub(crate) static CARD_BEFORE_NS: [std::sync::atomic::AtomicU64; 8] = [const { std::sync::atomic::AtomicU64::new(0) }; 8];
 
 /// Times, microseconds and the longest of [`mapped`].
 static MAPPED: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
@@ -6176,11 +6176,14 @@ impl Host {
         // up ahead of the lists, and a compare of what the shaders may
         // write follows them in the same submission.
         let flown = late && relay();
+        let part_began = std::time::Instant::now();
         if flown && self.card_results_low() {
             let settling = std::time::Instant::now();
             self.settle(&mut submitted, WHY_MOST);
             settled += settling.elapsed();
         }
+        let declaring = std::time::Instant::now();
+        CARD_BEFORE_NS[4].fetch_add((declaring - part_began).as_nanos() as u64, Ordering::Relaxed);
         // What shaders may write through views they pick: last, so that no
         // refresh of this submission leaves it alone.
         let picked = crate::picked::declare(runs);
@@ -6188,7 +6191,11 @@ impl Host {
             shadow.writing(*at, *len);
         }
         let declared = declared_writes(runs);
+        let before_began = std::time::Instant::now();
+        CARD_BEFORE_NS[5].fetch_add((before_began - declaring).as_nanos() as u64, Ordering::Relaxed);
         let card = self.card_before(&declared, &picked, flown);
+        let placing = std::time::Instant::now();
+        CARD_BEFORE_NS[6].fetch_add((placing - before_began).as_nanos() as u64, Ordering::Relaxed);
         if let Some(probe) = probe {
             let finished = FINISHED.load(Ordering::Acquire);
             two_queues::place(probe, this_submission, card.is_some(), own.is_some(), runs.len(), finished);
@@ -6201,6 +6208,7 @@ impl Host {
         if let Some(check) = card.as_ref().and_then(|c| c.check.clone()) {
             lists.push(Some(check));
         }
+        CARD_BEFORE_NS[7].fetch_add(placing.elapsed().as_nanos() as u64, Ordering::Relaxed);
         split.part(4);
         stage.next("submit: waiting for the heaps' records");
         let heaps_began = std::time::Instant::now();
@@ -9911,14 +9919,24 @@ impl Meter {
                             crate::shadow::WINDOW_MAPPED_BYTES.load(Ordering::Relaxed) >> 20
                         );
                     }
-                    let [gather, between, take, ranges] = CARD_BEFORE_NS.each_ref().map(|n| n.swap(0, Ordering::Relaxed));
+                    let [gather, between, take, ranges, settle, declare, whole, placed] =
+                        CARD_BEFORE_NS.each_ref().map(|n| n.swap(0, Ordering::Relaxed));
                     if since > 0.0 {
+                        let ms = |ns: u64| ns as f64 / 1e6;
                         tracing::info!(
                             "sends to copies in the card's memory, last {since:.0} s, on the submitting thread: {:.0} ms gathering what \
-                             changed ({ranges} ranges), {:.0} ms from there to the taking, {:.0} ms taking the bytes out",
-                            gather as f64 / 1e6,
-                            between as f64 / 1e6,
-                            take as f64 / 1e6
+                             changed ({ranges} ranges), {:.0} ms from there to the taking, {:.0} ms taking the bytes out; \
+                             the whole part: {:.0} ms settling flights first (results running low), {:.0} ms finding what shaders \
+                             write, {:.0} ms sends and compares ({:.0} of it recording the list and the compare), {:.0} ms copies \
+                             at their place after",
+                            ms(gather),
+                            ms(between),
+                            ms(take),
+                            ms(settle),
+                            ms(declare),
+                            ms(whole),
+                            ms(whole.saturating_sub(gather + between + take)),
+                            ms(placed)
                         );
                     }
                     let making = take_making();
