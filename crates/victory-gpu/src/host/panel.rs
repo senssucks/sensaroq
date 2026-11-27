@@ -64,7 +64,12 @@ fn pressed() -> bool {
 
 /// The box's size in pixels, a dot being `scale` of them each way.
 const fn size(scale: u32) -> (u32, u32) {
-    ((COLUMNS * CELL.0 + 2 * RIM) * scale, (LINES * CELL.1 + 2 * RIM) * scale)
+    box_size((COLUMNS, LINES), scale)
+}
+
+/// The size of a box of `columns` and `lines` of characters.
+const fn box_size((columns, lines): (u32, u32), scale: u32) -> (u32, u32) {
+    ((columns * CELL.0 + 2 * RIM) * scale, (lines * CELL.1 + 2 * RIM) * scale)
 }
 
 /// Pixels to a dot for a picture that high: a 720-line screenshot of it
@@ -75,10 +80,14 @@ fn scale(height: u32) -> u32 {
 
 /// Whether a dot of the picture of `lines` is white.
 fn lit(lines: &[String], x: u32, y: u32) -> bool {
+    lit_in(COLUMNS, lines, x, y)
+}
+
+fn lit_in(columns: u32, lines: &[String], x: u32, y: u32) -> bool {
     let (Some(x), Some(y)) = (x.checked_sub(RIM), y.checked_sub(RIM)) else {
         return false;
     };
-    if x % CELL.0 >= GLYPH.0 || y % CELL.1 >= GLYPH.1 || x / CELL.0 >= COLUMNS {
+    if x % CELL.0 >= GLYPH.0 || y % CELL.1 >= GLYPH.1 || x / CELL.0 >= columns {
         return false;
     }
     let Some(&c) = lines.get((y / CELL.1) as usize).and_then(|l| l.as_bytes().get((x / CELL.0) as usize)) else {
@@ -89,13 +98,17 @@ fn lit(lines: &[String], x: u32, y: u32) -> bool {
 
 /// The box as rows of `pitch` bytes.
 fn painted(lines: &[String], scale: u32, colours: [&[u8]; 2], pitch: usize) -> Vec<u8> {
-    let (width, height) = size(scale);
+    painted_in((COLUMNS, LINES), lines, scale, colours, pitch)
+}
+
+fn painted_in(dims: (u32, u32), lines: &[String], scale: u32, colours: [&[u8]; 2], pitch: usize) -> Vec<u8> {
+    let (width, height) = box_size(dims, scale);
     let bytes = colours[0].len();
     let mut out = vec![0; pitch * height as usize];
     for y in 0..height / scale {
         let top = pitch * (y * scale) as usize;
         for x in 0..width / scale {
-            let colour = colours[usize::from(lit(lines, x, y))];
+            let colour = colours[usize::from(lit_in(dims.0, lines, x, y))];
             for i in 0..scale {
                 let at = top + (x * scale + i) as usize * bytes;
                 out[at..at + bytes].copy_from_slice(colour);
@@ -199,6 +212,8 @@ fn text(c: &[f64; COUNTERS], ms: f64, worst: f64, cost: f64, host: &Host) -> Vec
 
 /// The buffers of a box that size and format.
 struct Buffers {
+    /// Columns and lines of characters.
+    dims: (u32, u32),
     format: DXGI_FORMAT,
     scale: u32,
     pitch: u32,
@@ -214,8 +229,8 @@ struct Buffers {
 unsafe impl Send for Buffers {}
 
 impl Buffers {
-    fn new(host: &Host, format: DXGI_FORMAT, scale: u32) -> Option<Buffers> {
-        let (width, height) = size(scale);
+    fn new(host: &Host, dims: (u32, u32), format: DXGI_FORMAT, scale: u32) -> Option<Buffers> {
+        let (width, height) = box_size(dims, scale);
         let pitch = (width * colours(format)?[0].len() as u32).next_multiple_of(256);
         let bytes = u64::from(pitch) * u64::from(height);
         let uploads = (0..UPLOADS).map(|_| host.upload_buffer(bytes)).collect::<Option<Vec<_>>>()?;
@@ -240,12 +255,12 @@ impl Buffers {
                 .CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, None, &mut card)
                 .ok()?;
         }
-        Some(Buffers { format, scale, pitch, uploads, card: card?, turn: 0, fresh: false })
+        Some(Buffers { dims, format, scale, pitch, uploads, card: card?, turn: 0, fresh: false })
     }
 
     fn write(&mut self, lines: &[String]) {
         let Some(colours) = colours(self.format) else { return };
-        let picture = painted(lines, self.scale, colours, self.pitch as usize);
+        let picture = painted_in(self.dims, lines, self.scale, colours, self.pitch as usize);
         self.turn = (self.turn + 1) % UPLOADS;
         // SAFETY: a mapped upload buffer of the picture's size, which the card read a second or more ago.
         unsafe { std::ptr::copy_nonoverlapping(picture.as_ptr(), self.uploads[self.turn].1, picture.len()) };
@@ -341,7 +356,7 @@ impl Panel {
         if self.buffers.as_ref().is_none_or(|b| (b.format, b.scale) != (format, scale)) {
             // (What the card may still read stays: a picture's size changes once or twice in a run.)
             std::mem::forget(self.buffers.take());
-            self.buffers = Buffers::new(host, format, scale);
+            self.buffers = Buffers::new(host, (COLUMNS, LINES), format, scale);
             self.failed = self.buffers.is_none();
             self.changed = true;
         }
@@ -349,7 +364,16 @@ impl Panel {
         if std::mem::take(&mut self.changed) {
             buffers.write(&self.lines);
         }
-        let (w, h) = size(scale);
+        copy_box(buffers, list, back, (width, height), format, 0);
+        self.cost += began.elapsed();
+    }
+}
+
+/// Records the copy of `buffers`' box onto `back` (that size and format),
+/// its left edge at `left`.
+fn copy_box(buffers: &mut Buffers, list: &HostList, back: &ID3D12Resource, (width, height): (u32, u32), format: DXGI_FORMAT, left: u32) {
+    {
+        let (w, h) = box_size(buffers.dims, buffers.scale);
         let list = &list.list;
         // SAFETY: an open list and live resources; the box lies within both.
         unsafe {
@@ -386,13 +410,89 @@ impl Panel {
                 left: 0,
                 top: 0,
                 front: 0,
-                right: w.min(width),
+                right: w.min(width.saturating_sub(left)),
                 bottom: h.min(height),
                 back: 1,
             };
-            list.CopyTextureRegion(&to, 0, 0, 0, &from, Some(&part));
+            list.CopyTextureRegion(&to, left, 0, 0, &from, Some(&part));
         }
-        self.cost += began.elapsed();
+    }
+}
+
+/// Characters of the shader badge's one line.
+const BADGE_COLUMNS: u32 = 34;
+
+/// While host pipelines are being made: a small box in the upper right
+/// corner, "BUILDING SHADERS 62%  540 LEFT" (the share of those queued since
+/// it appeared that are made). On by default; `VICTORY_SHADER_BADGE=0` hides
+/// it.
+pub(super) struct Badge {
+    last: Instant,
+    /// The most queued at once since it appeared.
+    peak: u64,
+    lines: Vec<String>,
+    changed: bool,
+    buffers: Option<Buffers>,
+    failed: bool,
+}
+
+fn badge_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SHADER_BADGE").is_none_or(|v| v != "0"))
+}
+
+/// The badge's line: `left` queued of at most `peak`.
+fn badge_text(left: u64, peak: u64) -> String {
+    let done = 100 * peak.saturating_sub(left) / peak.max(1);
+    let text = format!("BUILDING SHADERS {done}%  {left} LEFT");
+    format!("{text:<width$}", width = BADGE_COLUMNS as usize)
+}
+
+impl Badge {
+    pub(super) fn new() -> Badge {
+        Badge { last: Instant::now(), peak: 0, lines: Vec::new(), changed: false, buffers: None, failed: false }
+    }
+
+    /// A frame was presented.
+    pub(super) fn frame(&mut self) {
+        if !badge_on() || self.last.elapsed() < EVERY {
+            return;
+        }
+        self.last = Instant::now();
+        let left = crate::pipeline::making();
+        if left == 0 {
+            self.peak = 0;
+            self.changed |= !self.lines.is_empty();
+            self.lines.clear();
+            return;
+        }
+        self.peak = self.peak.max(left);
+        let line = badge_text(left, self.peak);
+        if self.lines.first() != Some(&line) {
+            self.lines = vec![line];
+            self.changed = true;
+        }
+    }
+
+    /// Records the copy of the box onto `back`, as [`Panel::draw`].
+    pub(super) fn draw(&mut self, host: &Host, list: &HostList, back: &ID3D12Resource, (width, height): (u32, u32), format: DXGI_FORMAT) {
+        if self.lines.is_empty() || self.failed {
+            return;
+        }
+        // Smaller than the panel: a dot a pixel up to 2159 lines.
+        let scale = (height / 1080).max(1);
+        if self.buffers.as_ref().is_none_or(|b| (b.format, b.scale) != (format, scale)) {
+            std::mem::forget(self.buffers.take());
+            self.buffers = Buffers::new(host, (BADGE_COLUMNS, 1), format, scale);
+            self.failed = self.buffers.is_none();
+            self.changed = true;
+        }
+        let Some(buffers) = &mut self.buffers else { return };
+        if std::mem::take(&mut self.changed) {
+            buffers.write(&self.lines);
+        }
+        let (w, _) = box_size((BADGE_COLUMNS, 1), scale);
+        copy_box(buffers, list, back, (width, height), format, width.saturating_sub(w));
     }
 }
 
@@ -420,6 +520,14 @@ mod tests {
         assert_eq!(generated(27.5, 1), "FRAME GEN OFF");
         assert_eq!(generated(27.5, 6), "FRAME GEN 6X  SHOWN 165.0 FPS");
         assert!(generated(999.9, 6).len() <= COLUMNS as usize);
+    }
+
+    #[test]
+    fn the_badge_fits() {
+        assert_eq!(badge_text(540, 1000).trim_end(), "BUILDING SHADERS 46%  540 LEFT");
+        assert_eq!(badge_text(5, 5).trim_end(), "BUILDING SHADERS 0%  5 LEFT");
+        assert_eq!(badge_text(99_999, 99_999).len(), BADGE_COLUMNS as usize);
+        assert_ne!(glyph(b'%'), glyph(b'#'));
     }
 
     #[test]

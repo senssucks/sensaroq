@@ -9438,6 +9438,7 @@ struct Presenter {
     composer: Option<crate::compose::Composer>,
     /// The numbers panel (F3), in every build.
     panel: panel::Panel,
+    badge: panel::Badge,
     /// The F1 settings menu.
     menu: menu::Menu,
 }
@@ -10181,6 +10182,7 @@ impl Host {
                 list.ResourceBarrier(&[transition(&back, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST)]);
             }
             p.panel.draw(self, copy, &back, (width, height), format);
+            p.badge.draw(self, copy, &back, (width, height), format);
             p.menu.draw(self, copy, &back, (width, height), format);
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
@@ -10242,6 +10244,7 @@ impl Host {
             crate::streamline::present_ends(presenting);
             showing.next("the frame meter");
             p.panel.frame(p.meter.line_due());
+            p.badge.frame();
             p.menu.frame();
             p.meter.frame(p.hwnd);
             showing.end();
@@ -10330,6 +10333,7 @@ impl Host {
                 meter: Meter::new(),
                 composer: None,
                 panel: panel::Panel::new(),
+                badge: panel::Badge::new(),
                 menu: menu::Menu::new(),
             })
         }
