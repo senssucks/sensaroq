@@ -772,7 +772,7 @@ pub(crate) fn stale_pages(most: usize, say: &mut dyn FnMut(&Shadow, usize, usize
 /// many.
 pub(crate) fn copy_all(copies: Vec<(usize, usize, usize)>) {
     let bytes: usize = copies.iter().map(|c| c.2).sum();
-    if bytes > 4 << 20 {
+    if bytes > wide_from() {
         wide(copy_jobs(copies));
         return;
     }
@@ -782,11 +782,22 @@ pub(crate) fn copy_all(copies: Vec<(usize, usize, usize)>) {
     }
 }
 
+/// From how many bytes [`copy_all`] and [`copy_all_title`] spread over the
+/// kept threads: 4 MB, or `VICTORY_WIDE_FROM_KB` (at least 64). Session 29:
+/// taking a submission's sends took the submitting thread about 15 ms a
+/// frame, mostly in sends under that.
+fn wide_from() -> usize {
+    static FROM: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *FROM.get_or_init(|| {
+        std::env::var("VICTORY_WIDE_FROM_KB").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(4 << 20, |kb| kb.max(64) << 10)
+    })
+}
+
 /// [`copy_all`] out of title memory itself (pages that are not there read
 /// as zeros): the sends of copies without a PC side ([`sideless`]).
 pub(crate) fn copy_all_title(copies: Vec<(usize, usize, usize)>) {
     let bytes: usize = copies.iter().map(|c| c.2).sum();
-    if bytes <= 4 << 20 {
+    if bytes <= wide_from() {
         for (src, dst, len) in copies {
             crate::host::copy_mapped(dst as *mut u8, src as *const u8, len, false);
         }

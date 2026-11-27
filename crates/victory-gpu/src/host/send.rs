@@ -203,7 +203,10 @@ pub(super) fn take(host: &Host, dirty: &[(std::sync::Arc<Shadow>, Vec<(usize, us
     // without the switch, most of them words). What lies between is title
     // memory too, which the card's side holds or is to hold: no shader
     // writes such a copy.
-    const GAP: usize = 64 << 10;
+    // (`VICTORY_SEND_GAP_KB`: another gap, 0 joins only ranges that touch.
+    // What lies between is sent too: session 29 sent 51-56 MB a frame.)
+    static GAP_AT: OnceLock<usize> = OnceLock::new();
+    let gap = *GAP_AT.get_or_init(|| std::env::var("VICTORY_SEND_GAP_KB").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(64 << 10, |kb| kb << 10));
     let joined: Vec<Vec<(usize, usize)>> = dirty
         .iter()
         .zip(&sideless)
@@ -212,7 +215,7 @@ pub(super) fn take(host: &Host, dirty: &[(std::sync::Arc<Shadow>, Vec<(usize, us
             if title {
                 for &(a, b) in ranges.iter() {
                     match out.last_mut() {
-                        Some(last) if a <= last.1 + GAP => last.1 = last.1.max(b),
+                        Some(last) if a <= last.1 + gap => last.1 = last.1.max(b),
                         _ => out.push((a, b)),
                     }
                 }
