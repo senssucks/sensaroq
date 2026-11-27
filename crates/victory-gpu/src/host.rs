@@ -2262,7 +2262,7 @@ fn take_chunk(host: &Host, size: u64) -> Option<Chunk> {
         ALIVE[5].fetch_add(1, Ordering::Relaxed);
         return Some(chunk);
     }
-    let (buffer, data) = host.upload_buffer(size)?;
+    let (buffer, data) = host.shader_input_buffer(size)?;
     name(&buffer, || "list scratch".into());
     ALIVE[1].fetch_add(1, Ordering::Relaxed);
     ALIVE[2].fetch_add(size, Ordering::Relaxed);
@@ -7805,7 +7805,7 @@ impl HostList {
         let mut s = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
         let len = len.max(1).next_multiple_of(256);
         if len > SCRATCH_CHUNK {
-            let (buffer, data) = host.upload_buffer(len)?;
+            let (buffer, data) = host.shader_input_buffer(len)?;
             name(&buffer, || format!("list scratch {len:#x}"));
             self.deferred().hold_upload(buffer.clone(), len);
             return Some((buffer, 0, data));
@@ -10920,6 +10920,28 @@ pub(crate) fn legal_for(flags: u32, state: u32) -> u32 {
         .fold(state, |s, &(_, _, bits)| s & !bits)
 }
 
+/// Bytes of [`Host::shader_input_buffer`]'s buffers in the card's memory
+/// alive, charged until each resource's last release.
+static READONLY_UPLOAD_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static READONLY_UPLOAD_ALLOCATION: Mutex<()> = Mutex::new(());
+
+unsafe extern "system" fn release_readonly_upload(charge: *mut std::ffi::c_void) {
+    READONLY_UPLOAD_BYTES.fetch_sub(charge as usize as u64, Ordering::Relaxed);
+}
+
+/// `VICTORY_GPU_UPLOAD_READONLY_MB` in bytes: 0 when unset or not a number,
+/// 2 GiB at most.
+fn readonly_upload_limit(mb: Option<&str>) -> u64 {
+    mb.and_then(|value| value.trim().parse::<u64>().ok()).unwrap_or(0).min(2048) << 20
+}
+
+/// Whether `size` more bytes fit: under the limit with what is `live`, and
+/// under nine tenths of the `budget` less what is `used` and `kept`.
+fn readonly_upload_fits(size: u64, live: u64, limit: u64, budget: u64, used: u64, kept: u64) -> bool {
+    let available = (budget - budget / 10).saturating_sub(used).saturating_sub(kept);
+    size != 0 && size <= limit.saturating_sub(live) && size <= available
+}
+
 impl Host {
     /// The card's memory as the system accounts it to this process, in
     /// bytes: the budget and the use of the card's own memory, then of the
@@ -11151,6 +11173,46 @@ impl Host {
                 None
             }
         }
+    }
+
+    /// A buffer for shader inputs only the CPU writes (descriptor stride
+    /// tables, list scratch): in the card's memory the CPU maps while
+    /// `VICTORY_GPU_UPLOAD_READONLY_MB` allows (Kelvaroq 0022; 0, the default:
+    /// none, as before) and the budget has room, else [`Host::upload_buffer`].
+    /// Shaders then read them at the card's speed, not over the bus.
+    #[track_caller]
+    pub(crate) fn shader_input_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+        self.readonly_gpu_upload(size).or_else(|| self.upload_buffer(size))
+    }
+
+    /// [`Host::shader_input_buffer`]'s card memory, charged to
+    /// [`READONLY_UPLOAD_BYTES`] until the resource's last release (command
+    /// lists and descriptor tables may keep a reference), and made only while
+    /// a tenth of the budget and the room kept for big copies and render
+    /// targets stay free.
+    #[track_caller]
+    fn readonly_gpu_upload(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+        static LIMIT: OnceLock<u64> = OnceLock::new();
+        let limit = *LIMIT.get_or_init(|| readonly_upload_limit(std::env::var("VICTORY_GPU_UPLOAD_READONLY_MB").ok().as_deref()));
+        if size == 0 || size > limit || !self.mapped_card_memory() {
+            return None;
+        }
+        let charge = size.checked_next_multiple_of(D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT as u64)?;
+        // Two creators must not both spend the same headroom; releases only
+        // subtract from the count and never take this lock.
+        let _allocating = READONLY_UPLOAD_ALLOCATION.lock().unwrap_or_else(|e| e.into_inner());
+        let [budget, used, ..] = self.video_memory()?;
+        let kept = crate::shadow::card_room_kept().saturating_add(crate::resource::targets_room_kept());
+        if !readonly_upload_fits(charge, READONLY_UPLOAD_BYTES.load(Ordering::Relaxed), limit, budget, used, kept) {
+            return None;
+        }
+        let (buffer, data) = self.mapped_card_buffer(size, false)?;
+        let notifier = buffer.cast::<windows::Win32::Graphics::Direct3D::ID3DDestructionNotifier>().ok()?;
+        // SAFETY: our reference keeps the resource alive until after the
+        // charge is recorded; the callback never dereferences its data.
+        unsafe { notifier.RegisterDestructionCallback(Some(release_readonly_upload), charge as usize as *const _) }.ok()?;
+        READONLY_UPLOAD_BYTES.fetch_add(charge, Ordering::Relaxed);
+        Some((buffer, data))
     }
 
     /// A device-local buffer shaders may write (unordered access) and indirect
