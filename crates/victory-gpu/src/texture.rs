@@ -120,6 +120,11 @@ const HOT_FRAMES: u64 = 64;
 /// `VICTORY_PARTIAL_FRAMES`, 30 by default, at least 1. A mip that streams
 /// in shows up to this many frames late: at 10 fps the default is 3 s of the
 /// low-detail mip, so a lower number shortens pop-in for more CPU reading.
+fn exact_guard() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_EXACT_GUARD").is_some_and(|v| v == "1"))
+}
+
 fn partial_frames() -> u64 {
     static N: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *N.get_or_init(|| {
@@ -1505,7 +1510,13 @@ impl Staging {
                 last.hot_until = frame + HOT_FRAMES;
             }
             let hot = hot_textures() && frame < last.hot_until;
-            if !exact && unwritten && !turn && !hot {
+            // `VICTORY_EXACT_GUARD=1`: a texture recorded for a bake is
+            // also taken as it was while the guard saw no write to it (and
+            // it is not its turn to be hashed). Without it each one is read
+            // whole and hashed at every check: 15.8 a frame in play
+            // (session 2b), on the submitting thread, whose 48 ms a frame
+            // left the card idle half of each frame.
+            if (!exact || exact_guard()) && unwritten && !turn && !hot {
                 return 0;
             }
             blind = unwritten;
