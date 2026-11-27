@@ -49,6 +49,12 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [cb412956](https://github.com/Peppacodes/playablegames-peppa/commit/cb412956) | Landed lists reset on their own thread (`VICTORY_LAND_ASIDE`) | Peppacodes |
 | [7f5d8261](https://github.com/Peppacodes/playablegames-peppa/commit/7f5d8261) | Windows never written stop being declared (`VICTORY_QUIET_WINDOWS`) | Peppacodes |
 
+### xcl-dev/xcl (ideas only, re-written; XCL is GPL-2.0-only)
+
+| Source | What | Author |
+|---|---|---|
+| [PR #68](https://github.com/xcl-dev/xcl/pull/68) | `v_fract_f32` of an infinity or NaN is NaN | the PR's author; written anew here |
+
 ### Others
 
 | Source | What | Author |
