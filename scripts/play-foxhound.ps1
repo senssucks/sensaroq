@@ -37,7 +37,11 @@ param(
     [hashtable]$More = @{},
     # The same as -More, as one string: 'NAME=value;NAME2=value2'. It works where a hashtable cannot be passed, such as
     # powershell -ExecutionPolicy Bypass -File .\scripts\play-foxhound.ps1 -Exe ... -Set 'VICTORY_SHADER_SAVE=E:\sensaroq\shaders'
-    [string]$Set = ''
+    [string]$Set = '',
+    # Instead of playing: build ahead, in the driver's cache on disk, the pipelines (shaders) the game has created
+    # in earlier runs, with the same settings as a game run. First those earlier runs drew with, then all the rest.
+    # Stop it at any time (Ctrl+C); it goes on where it stopped. Once per change of the layer or of the driver.
+    [switch]$Warm
 )
 $repo = Split-Path $PSScriptRoot -Parent
 # Windows' commit limit (RAM plus the page file). The title reserves memory as a console does, and with the layer's
@@ -167,6 +171,12 @@ $paths = 'VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DAT
 Get-ChildItem Env:VICTORY_* -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin $paths } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
 foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
 
+if ($Warm) {
+    Push-Location $repo
+    try { & $victory warm --used; if ($LASTEXITCODE -eq 0) { & $victory warm } }
+    finally { Pop-Location }
+    return
+}
 $logs = Join-Path $env:LOCALAPPDATA 'victory\logs'; New-Item -ItemType Directory -Force $logs | Out-Null
 $log = Join-Path $logs ('foxhound-{0:yyyyMMdd-HHmmss}.log' -f (Get-Date))
 $writer = [IO.StreamWriter]::new($log, $false, [Text.UTF8Encoding]::new($false)); $writer.AutoFlush = $true
