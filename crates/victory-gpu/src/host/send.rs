@@ -195,10 +195,13 @@ pub(super) fn take(host: &Host, dirty: &[(std::sync::Arc<Shadow>, Vec<(usize, us
     pass(host)?;
     // Runs of whole words of the copy: only those are pairs. (A byte beside
     // them in a word may be the card's.)
-    let short = |&(a, b): &(usize, usize)| short(a, b - a);
+    // A copy without its CPU side (`crate::shadow::sideless`) sends out of
+    // title memory, by copies alone (a word read there could fault).
+    let sideless: Vec<bool> = dirty.iter().map(|(shadow, _)| shadow.card_data().is_null()).collect();
     let mut at = 0u64;
     let mut copies = Vec::with_capacity(dirty.len());
-    for (_, ranges) in dirty {
+    for ((_, ranges), &title) in dirty.iter().zip(&sideless) {
+        let short = |&(a, b): &(usize, usize)| !title && short(a, b - a);
         let mut runs = Vec::new();
         for &(a, b) in ranges.iter().filter(|r| !short(r)) {
             runs.push((a, at, b - a));
@@ -212,9 +215,16 @@ pub(super) fn take(host: &Host, dirty: &[(std::sync::Arc<Shadow>, Vec<(usize, us
         return None;
     }
     let memory = memory(host, at)?;
+    let short = |&(a, b): &(usize, usize)| short(a, b - a);
     let mut moves: Vec<(usize, usize, usize)> = Vec::new();
+    let mut from_title: Vec<(usize, usize, usize)> = Vec::new();
     let mut work: Vec<(usize, &[(usize, usize)], usize)> = Vec::new();
-    for ((shadow, ranges), copy) in dirty.iter().zip(&copies) {
+    for (((shadow, ranges), copy), &title) in dirty.iter().zip(&copies).zip(&sideless) {
+        if title {
+            let from = shadow.title_start() as usize;
+            from_title.extend(copy.runs.iter().map(|&(a, to, n)| (from + a, memory.data + to as usize, n)));
+            continue;
+        }
         let from = shadow.card_data() as usize;
         moves.extend(copy.runs.iter().map(|&(a, to, n)| (from + a, memory.data + to as usize, n)));
         // (80,000 runs of some words a frame: in pieces of work.)
@@ -248,7 +258,10 @@ pub(super) fn take(host: &Host, dirty: &[(std::sync::Arc<Shadow>, Vec<(usize, us
     STATS[0].fetch_add(moves.iter().map(|m| m.2 as u64).sum(), Ordering::Relaxed);
     STATS[1].fetch_add(moves.len() as u64, Ordering::Relaxed);
     STATS[2].fetch_add(copies.iter().map(|c| u64::from(c.pairs.1)).sum(), Ordering::Relaxed);
+    STATS[0].fetch_add(from_title.iter().map(|m| m.2 as u64).sum(), Ordering::Relaxed);
+    STATS[1].fetch_add(from_title.len() as u64, Ordering::Relaxed);
     crate::shadow::copy_all(moves);
+    crate::shadow::copy_all_title(from_title);
     STATS[3].fetch_add(began.elapsed().as_micros() as u64, Ordering::Relaxed);
     Some(Own { memory, copies })
 }

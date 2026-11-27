@@ -4725,6 +4725,12 @@ impl Host {
         // its bytes from before, whole.
         let mut whole: Vec<Arc<crate::shadow::Shadow>> = Vec::new();
         for shadow in declared.iter().map(|d| &d.0).chain(looked.iter().map(|l| &l.0)) {
+            // Shaders write it: its CPU side is made now if it has none
+            // (`crate::shadow::sideless`); with none, nothing of it is
+            // compared or fetched.
+            if !shadow.card_side() {
+                continue;
+            }
             if shadow.card_make_before(|size| {
                 let before = self.uav_buffer(crate::shadow::card_hash_bytes(size))?;
                 name(&before, || "title buffer on the card, hashes of its pieces".into());
@@ -9870,9 +9876,11 @@ impl Meter {
                         let [cards, card_bytes, written, written_bytes] = crate::shadow::card_room();
                         tracing::info!(
                             "copies in the card's memory: {cards} with {} MB; of them {written} with {} MB that shaders were declared \
-                             to write (the others' PC side only mirrors title memory)",
+                             to write (the others' PC side only mirrors title memory); PC sides made late (VICTORY_CARD_SIDELESS=1) {}, {} MB",
                             card_bytes >> 20,
-                            written_bytes >> 20
+                            written_bytes >> 20,
+                            crate::shadow::SIDES_MADE[0].load(Ordering::Relaxed),
+                            crate::shadow::SIDES_MADE[1].load(Ordering::Relaxed) >> 20
                         );
                         let [n, bytes, asked, carded] = crate::shadow::window_room();
                         let [card, before] = [0, 1].map(|i| crate::shadow::CARD_BYTES[i].load(Ordering::Relaxed));
