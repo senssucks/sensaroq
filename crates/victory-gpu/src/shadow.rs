@@ -105,6 +105,9 @@ pub(crate) struct Shadow {
     /// and the bytes from the buffer's first byte to `start` (the heap
     /// begins on a 64 KiB line; a title buffer need not).
     place: Option<(windows::Win32::Graphics::Direct3D12::ID3D12Heap, u64)>,
+    /// For a window: whether shaders have been declared to write it and
+    /// never have (`VICTORY_QUIET_WINDOWS`, `crate::quiet`).
+    quiet: crate::quiet::Quiet,
 }
 
 /// What a copy in the card's memory ([`cards`]) has beside the buffer
@@ -3082,6 +3085,11 @@ unsafe impl Send for Shadow {}
 unsafe impl Sync for Shadow {}
 
 impl Shadow {
+    /// Where the title buffer starts (`crate::census`).
+    pub(crate) fn title_start(&self) -> u64 {
+        self.start
+    }
+
     /// The host GPU address of a title address inside the buffer.
     pub(crate) fn gpu(&self, address: u64) -> u64 {
         self.gpu + (address - self.start)
@@ -3196,6 +3204,41 @@ impl Shadow {
             wc: AtomicU8::new(0),
             mapped: false,
             place: None,
+            quiet: crate::quiet::Quiet::new(),
+        }
+    }
+
+    /// Whether this is a window of the kind `crate::quiet` learns about: a
+    /// copy in the PC's memory, not in the card's, not card memory mapped,
+    /// not in place.
+    fn quiet_kind(&self) -> bool {
+        self.window && self.card.is_none() && !self.mapped && self.place.is_none()
+    }
+
+    /// [`Shadow::gpu_writes`] for what a draw or a dispatch may store
+    /// through a root view or a buffer view of the copy: not made at all for
+    /// a window that has been compared many times with nothing written
+    /// (`VICTORY_QUIET_WINDOWS=1`, `crate::quiet`).
+    pub(crate) fn gpu_writes_viewed(self: &Arc<Self>, list: &HostList, address: u64, len: u64) {
+        if self.quiet_kind() {
+            let rules = crate::quiet::rules();
+            if rules.mode != crate::quiet::Mode::Off {
+                let from = address as usize;
+                let to = from.saturating_add(len.min(self.left(address)) as usize);
+                if self.quiet.declared(&rules, from, to) == crate::quiet::Verdict::Hold {
+                    return;
+                }
+            }
+        }
+        self.gpu_writes(list, address, len);
+    }
+
+    /// `VICTORY_QUIET_WINDOWS`: the declared range `[from, to)` (title
+    /// addresses) was compared after a flight, and `written` bytes of it went
+    /// back to title memory.
+    pub(crate) fn quiet_compared(&self, from: usize, to: usize, written: usize) {
+        if self.quiet_kind() {
+            self.quiet.compared(&crate::quiet::rules(), from, to, written);
         }
     }
 
@@ -5289,6 +5332,7 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
                     len,
                     "a buffer's host copy is in the card's memory"
                 );
+                crate::census::copy_made(key.0, len);
                 let card = Card {
                     staging: buffer,
                     before: Mutex::default(),
@@ -5555,10 +5599,27 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
             shadow.unsized_asks.fetch_add(1, Ordering::Relaxed);
         }
     };
+    // The window that serves the ask, by what `map` holds (the same choice
+    // under the shared lock and under the writer's).
+    let pick = |map: &BTreeMap<(u64, u64), Arc<Shadow>>| {
+        if unsized_ask && tails() {
+            let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
+            longest_tail(there, address, end).unwrap_or_else(|| tail_of(address, end))
+        } else if any && fine() && !unsized_ask {
+            let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
+            holder(there, address, end).unwrap_or(named)
+        } else {
+            named
+        }
+    };
     // The window is there already (nearly always): readers share the lock.
-    if !(unsized_ask && tails()) && !(any && fine() && !unsized_ask) {
+    // With tails or a finer grid this was the writer's lock for every ask,
+    // and the recording threads took turns at it (timeline run 2026-11-26
+    // 21:5x: 107 ms of waits a recording at this lock, inside the indirect
+    // draws' preparing, the slowest frames 70-180 ms).
+    {
         let map = LOOSE.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(shadow) = map.get(&named) {
+        if let Some(shadow) = map.get(&pick(&map)) {
             note(shadow);
             return Some(shadow.clone());
         }

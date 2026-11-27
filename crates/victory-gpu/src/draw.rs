@@ -620,9 +620,9 @@ pub(crate) struct State {
     /// address; 0 for none) → dynamic slot, and the host copy the slot
     /// shows: later draws of the list bring that one up to date, whatever
     /// copy the address would find by then (`shadow.rs` `tails`).
-    root_srv_slots: std::collections::HashMap<(usize, u64), RootSlot>,
+    root_srv_slots: std::collections::HashMap<(usize, u64), RootSlot, std::hash::BuildHasherDefault<crate::host::AddressHash>>,
     /// Root UAVs bound as one-view tables in this list, likewise.
-    root_uav_slots: std::collections::HashMap<(usize, u64), RootSlot>,
+    root_uav_slots: std::collections::HashMap<(usize, u64), RootSlot, std::hash::BuildHasherDefault<crate::host::AddressHash>>,
     /// The list ran and its dynamic slots were given back.
     tables_gone: bool,
     /// This recording, for [`crate::descriptor::host::HostHeap::make_listed`]
@@ -2270,7 +2270,7 @@ impl State {
             if writes {
                 #[cfg(feature = "diagnostics")]
                 crate::host::wide_write(a, len, self.pipeline);
-                s.gpu_writes(list, a, len);
+                s.gpu_writes_viewed(list, a, len);
             }
         };
         if !crate::pipeline::host::bounded_root_srvs() {
@@ -5676,7 +5676,7 @@ fn readable(list: &HostList, kind: ResourceType, view: &View) {
             if STORES.get() || !write_skip() {
                 #[cfg(feature = "diagnostics")]
                 crate::host::wide_write(address, len, 0);
-                shadow.gpu_writes(list, address, len);
+                shadow.gpu_writes_viewed(list, address, len);
             } else {
                 #[cfg(feature = "diagnostics")]
                 {
@@ -5691,8 +5691,17 @@ fn readable(list: &HostList, kind: ResourceType, view: &View) {
             // A view the title placed, in another format, in the memory of
             // a texture the host writes: that texture's texels, copied on
             // the host (title memory does not have them).
-            let aliased = crate::resource::alias_of(*resource as This)
-                .is_some_and(|source| crate::texture::alias(list, *resource as This, source));
+            // Where every descriptor of the view shows that texture itself
+            // (`crate::resource::read_cast`), it is read as it is: no copy.
+            let cast = crate::resource::read_cast(*resource as This);
+            if let Some(source) = cast {
+                crate::list::ensure_state(list, source, SHADER_RESOURCE);
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::AliasCast, 1);
+            }
+            let aliased = cast.is_some()
+                || crate::resource::alias_of(*resource as This)
+                    .is_some_and(|source| crate::texture::alias(list, *resource as This, source));
             if !aliased
                 && let Some(t) = crate::resource::host_copy(*resource as This)
                 && t.flags() & 0x7 == 0
