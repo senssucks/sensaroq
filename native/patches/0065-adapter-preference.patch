@@ -1,0 +1,91 @@
+diff --git a/crates/victory-gpu/src/host.rs b/crates/victory-gpu/src/host.rs
+index bcd0d58..c965b2f 100644
+--- a/crates/victory-gpu/src/host.rs
++++ b/crates/victory-gpu/src/host.rs
+@@ -601,8 +601,12 @@ fn create() -> windows::core::Result<Host> {
+             let adapter = warp_adapter()?;
+             D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+             tracing::info!("host device on the software adapter (WARP)");
++        } else if let Some((adapter, made)) = preferred_device() {
++            tracing::info!(adapter = %adapter, "host device on the preferred adapter");
++            device = Some(made);
+         } else {
+             D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
++            tracing::warn!("no preferred hardware adapter: host device on the default adapter");
+         }
+         let device = device.ok_or_else(windows::core::Error::empty)?;
+         // `VICTORY_D3D12_BACKGROUND=0`: the runtime's background work (the
+@@ -683,6 +687,73 @@ fn create() -> windows::core::Result<Host> {
+ 
+ /// DXGI may return hardware for `EnumWarpAdapter` (notably under Proton).
+ /// Reject it before creating a device in diagnostics' software-only mode.
++/// The hardware adapter the host device is made on.
++///
++/// `D3D12CreateDevice(None, ..)` takes DXGI's first adapter, the one that
++/// drives the primary display. On a PC with integrated graphics (a Ryzen G
++/// or an Intel CPU with its own GPU) whose monitor is plugged into the
++/// motherboard, that is the integrated GPU: menus still draw, but the
++/// world's mesh and wave pipelines are refused and the frame stays the clear
++/// colour at a few frames per second. Adapters are taken here in DXGI's
++/// high-performance order, software adapters skipped, and the first one
++/// that runs mesh shaders (the title's world geometry) is kept; failing
++/// that, the first hardware adapter that makes a device.
++///
++/// `VICTORY_ADAPTER` overrides the choice: a number is an index in that
++/// order, any other text a case-insensitive part of the adapter's name
++/// (`VICTORY_ADAPTER=5060`).
++fn preferred_device() -> Option<(String, ID3D12Device)> {
++    let wanted = std::env::var("VICTORY_ADAPTER").ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
++    let index = wanted.as_deref().and_then(|v| v.parse::<u32>().ok());
++    let part = wanted.as_deref().filter(|_| index.is_none()).map(str::to_lowercase);
++    // SAFETY: plain DXGI enumeration and D3D12 device creation.
++    unsafe {
++        let factory: IDXGIFactory6 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
++        let mut fallback: Option<(String, ID3D12Device)> = None;
++        for i in 0.. {
++            let Ok(adapter) =
++                factory.EnumAdapterByGpuPreference::<IDXGIAdapter1>(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE)
++            else {
++                break;
++            };
++            let Ok(desc) = adapter.GetDesc1() else { continue };
++            let len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
++            let name = String::from_utf16_lossy(&desc.Description[..len]);
++            if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
++                continue;
++            }
++            if index.is_some_and(|n| n != i)
++                || part.as_deref().is_some_and(|p| !name.to_lowercase().contains(p))
++            {
++                continue;
++            }
++            let mut device: Option<ID3D12Device> = None;
++            if D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device).is_err() {
++                tracing::info!(adapter = %name, "adapter refused a feature level 12.0 device");
++                continue;
++            }
++            let Some(device) = device else { continue };
++            let mut o7 = D3D12_FEATURE_DATA_D3D12_OPTIONS7::default();
++            let mesh = device
++                .CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, (&raw mut o7).cast(), size_of_val(&o7) as u32)
++                .is_ok()
++                && o7.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED;
++            let vram_mb = desc.DedicatedVideoMemory / (1 << 20);
++            tracing::info!(index = i, adapter = %name, mesh, vram_mb, "hardware adapter");
++            if mesh || wanted.is_some() {
++                return Some((name, device));
++            }
++            if fallback.is_none() {
++                fallback = Some((name, device));
++            }
++        }
++        if wanted.is_some() {
++            tracing::warn!(wanted = ?wanted, "VICTORY_ADAPTER matched no hardware adapter");
++        }
++        fallback
++    }
++}
++
+ pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
+     // SAFETY: plain DXGI adapter queries.
+     unsafe {

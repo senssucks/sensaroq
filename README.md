@@ -198,6 +198,10 @@ Automatic uses the following limits for the preferred compatible discrete GPU. T
 
 On multi-GPU PCs the launcher profiles the preferred discrete device. Windows selects the adapter for each executable. Select **High performance** for `kelvaroq-engine.exe` in Windows Graphics settings to use that device. The engine checks the active adapter's wave width again before pairing. An unsupported or unverified graphics requirement leaves the engine settings at their inherited values.
 
+The engine itself now makes its device on the first hardware adapter in DXGI's high-performance order that supports mesh shaders (patch 0065), so a PC with integrated graphics, such as a Ryzen G APU with the monitor on the motherboard, no longer renders the world on the integrated GPU. `VICTORY_ADAPTER` overrides the choice with an index in that order or part of the adapter's name, for example `VICTORY_ADAPTER=5060`.
+
+Every 5 seconds the session log has a `dstorage: last 5.0 s` line with the streaming requests completed, failed requests, the slowest request and the requests still waiting (patch 0066). A world that stays gray while `waiting` grows or `failed` is not zero is starved of data rather than of shaders. `VICTORY_DSTORAGE_STATS=0` moves the line back to debug level.
+
 Set `VICTORY_LAUNCHER_PROFILES=0` for detection alone. Set `VICTORY_LAUNCHER_HARDWARE=0` to restore the previous workspace and launch environment.
 
 ## Build from source
