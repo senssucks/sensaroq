@@ -9,13 +9,14 @@
 # VICTORY_THIN=1 records the title's list calls on eight threads of ours instead of the title's own (findings.md:
 # 75 -> 68 ms a frame on an i9), but washed the scene out on an RTX 5060 Ti in another fork (avatarmanz#112): look at
 # the picture during that run.
-# VICTORY_GAPS_KNOWN=0 turns off 6d40795 (refreshes around shader-written ranges known to copy nothing), to see what it saved.
+# VICTORY_PORT_CONSTANTS=1 and VICTORY_INPLACE=1 let the card read some title memory where it lies instead of the
+# layer copying it each frame: less CPU, more work over PCIe for the card (idle about half the frame on a 5060 Ti).
 # '' is the launcher as it is. The first minute in the world is left out of the numbers (shaders, streaming).
 # Results go to bench-<time>.txt in the logs folder (%LOCALAPPDATA%\victory\logs) and on screen.
 param(
     [Parameter(Mandatory)][string]$Exe,
     [double]$Minutes = 5,
-    [string[]]$Variants = @('', 'VICTORY_THIN=1', 'VICTORY_GAPS_KNOWN=0', 'VICTORY_PIPELINE_WAIT_MS=500', 'VICTORY_PIPELINE_WORKERS=4', 'VICTORY_WIDE_SPIN=50', 'VICTORY_TEXTURE_STAGE_MS=50'),
+    [string[]]$Variants = @('', 'VICTORY_PORT_CONSTANTS=1', 'VICTORY_INPLACE=1', 'VICTORY_PIPELINE_WORKERS=4', 'VICTORY_WIDE_SPIN=50', 'VICTORY_THIN=1'),
     [string[]]$PlayArgs = @()
 )
 $play = Join-Path $PSScriptRoot 'play-foxhound.ps1'
