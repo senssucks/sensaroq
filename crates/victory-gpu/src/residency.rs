@@ -107,6 +107,10 @@ fn next_pressure(was: bool, physical: u64, commit: u64) -> bool {
 pub(crate) fn refresh() {
     let Some(status) = memory_status() else { return };
     let (physical, commit) = (status.ullAvailPhys, status.ullAvailPageFile);
+    if status.ullTotalPhys > 0 {
+        let used = status.ullTotalPhys.saturating_sub(physical);
+        RAM_USED_PERMILLE.store(used * 1000 / status.ullTotalPhys, Ordering::Relaxed);
+    }
     HEADROOM.store(physical.min(commit), Ordering::Relaxed);
     let was = pressured();
     let pressure = next_pressure(was, physical, commit);
@@ -156,6 +160,15 @@ pub(crate) fn critical_commit() -> bool {
 /// took about two minutes to come in (void around the player; session 6:
 /// 2.3 GB in 40 s). The staging this holds lives only until its upload has
 /// run (53 MB alive at once in that session).
+/// The PC's RAM in use, in thousandths (sampled once a second).
+static RAM_USED_PERMILLE: AtomicU64 = AtomicU64::new(0);
+
+/// `VICTORY_RAM_LIMIT_PERCENT` (95 by default), in thousandths.
+fn ram_limit_permille() -> u64 {
+    static P: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *P.get_or_init(|| std::env::var("VICTORY_RAM_LIMIT_PERCENT").ok().and_then(|v| v.trim().parse::<f64>().ok()).map_or(950, |p| (p.clamp(50.0, 100.0) * 10.0) as u64))
+}
+
 fn pressured_prefetch_bytes() -> u64 {
     static MB: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *MB.get_or_init(|| std::env::var("VICTORY_PRESSURED_PREFETCH_MB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)) << 20
@@ -167,9 +180,11 @@ pub(crate) fn prefetch_limit(bytes: u64, pressure: bool, critical: bool, limited
     } else if limited && staging >= GIB {
         bytes.min(64 << 20)
     } else if pressure {
-        // 0 (the default): no cut, the frame's whole budget.
+        // 0 (the default): no cut while the PC's RAM is under
+        // `VICTORY_RAM_LIMIT_PERCENT` (95) in use; past it, 64 MB a frame.
         match pressured_prefetch_bytes() {
-            0 => bytes,
+            0 if RAM_USED_PERMILLE.load(Ordering::Relaxed) < ram_limit_permille() => bytes,
+            0 => bytes.min(64 << 20),
             cap => bytes.min(cap.max(16 << 20)),
         }
     } else {
