@@ -474,6 +474,12 @@ pub(crate) fn host_pipeline<'a>(this: This) -> Option<&'a host::HostPipeline> {
     make::ready(&pipeline(this).host)
 }
 
+/// See `make::take_waited`.
+#[cfg(windows)]
+pub(crate) fn take_waited() -> [u64; 2] {
+    make::take_waited()
+}
+
 /// Host pipelines queued and not made yet.
 #[cfg(windows)]
 pub(crate) fn making() -> u64 {

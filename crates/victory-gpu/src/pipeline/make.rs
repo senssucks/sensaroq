@@ -356,6 +356,15 @@ pub(crate) fn take_not_made_yet() -> u64 {
     NOT_MADE_YET.swap(0, Ordering::Relaxed)
 }
 
+/// Nanoseconds draws and dispatches waited for their pipelines to be made
+/// (others, passes over the screen), on all threads, since [`take_waited`].
+static WAITED_NS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// See [`WAITED_NS`] (for the submitting thread's line).
+pub(crate) fn take_waited() -> [u64; 2] {
+    [WAITED_NS[0].swap(0, Ordering::Relaxed), WAITED_NS[1].swap(0, Ordering::Relaxed)]
+}
+
 /// Pipelines queued and not made yet (for the frame line).
 pub(crate) fn waiting() -> u64 {
     WAITING.load(Ordering::Relaxed)
@@ -458,6 +467,7 @@ fn wait(p: &Pending, frame: u64) {
     }
     drop(held);
     let waited = started.elapsed().min(left);
+    WAITED_NS[usize::from(screen)].fetch_add(waited.as_nanos() as u64, Ordering::Relaxed);
     if screen && waited > Duration::from_millis(500) {
         tracing::info!(
             ms = waited.as_millis() as u64,

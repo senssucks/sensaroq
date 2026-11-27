@@ -8154,6 +8154,7 @@ fn submit_split_line(frames: f64) {
     let f: [f64; 4] = std::array::from_fn(|i| FLUSHES[i].swap(0, Ordering::Relaxed) as f64 / frames);
     let after = AFTER_SEND.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
     let all: f64 = [0, 1, 2, 3, 4, 5, 11, 12, 13, 14, 15].iter().map(|&i| ms[i]).sum();
+    let waited = crate::pipeline::take_waited();
     if all + after <= 0.0 {
         return;
     }
@@ -8165,7 +8166,7 @@ fn submit_split_line(frames: f64) {
          in the card's memory, {:.1} sending the lists (VICTORY_LIGHT_REFRESH is {}); ahead of these {:.1} waiting for the \
          submission lock, {:.1} planning steps done on the card, {:.1} waiting for flights, {:.1} the heaps' records and what is \
          swept; at the end {:.1} waiting for the heaps' records; after the sending {after:.1} (the flight noted, landed lists \
-         reset and given back)",
+         reset and given back); waiting for pipelines being made, all threads: {:.1} (passes over the screen {:.1})",
         ms[0],
         ms[8],
         ms[1],
@@ -8187,6 +8188,8 @@ fn submit_split_line(frames: f64) {
         ms[13],
         ms[14],
         ms[15],
+        waited[0] as f64 / 1e6 / frames,
+        waited[1] as f64 / 1e6 / frames,
     );
     let [first, again] = [0, 1].map(|i| HEAP_SYNC_FIRST[i].swap(0, Ordering::Relaxed) as f64 / frames);
     if first + again > 0.0 {
