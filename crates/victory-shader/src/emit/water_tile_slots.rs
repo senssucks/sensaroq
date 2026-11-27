@@ -52,8 +52,10 @@ const BACK: Append = Append {
     kept: &[0x740..0x748, 0x74c..0x754, 0x75c..0x760, 0x770..0x774],
 };
 
+/// Only with `VICTORY_WATER_TILE_SLOTS=1` (trustno1-coder #326; off by
+/// default here).
 pub(super) fn on() -> bool {
-    std::env::var_os("VICTORY_WATER_TILE_SLOTS").is_none_or(|v| v != "0")
+    std::env::var_os("VICTORY_WATER_TILE_SLOTS").is_some_and(|v| v == "1")
 }
 
 fn fnv(bytes: &[u8]) -> u64 {
