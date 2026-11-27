@@ -192,4 +192,10 @@ $writer.WriteLine("# console=$console build=$Build switches: " + (($settings.Get
 Write-Host "Log: $log"
 Push-Location $repo   # victory.toml is read from here
 try { & $victory run $Exe --console $console --execute 2>&1 | ForEach-Object { $line = "$_"; $writer.WriteLine($line); $line } }
-finally { Pop-Location; $writer.Dispose() }
+finally {
+    # How the game ended, for a log that just stops: 0xC0000409 a fail-fast (the title's or a driver's), 0xC00000FD
+    # a stack overflow, 0xC0000005 an access violation, 0xE0434352 or 1 most likely closed from outside.
+    $code = $LASTEXITCODE
+    if ($null -ne $code) { $writer.WriteLine(('# victory exited with code {0} (0x{1:X8}) at {2:HH:mm:ss}' -f $code, ([int64]$code -band 0xFFFFFFFF), (Get-Date))) }
+    Pop-Location; $writer.Dispose()
+}
