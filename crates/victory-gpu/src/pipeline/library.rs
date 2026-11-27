@@ -1187,6 +1187,11 @@ pub(crate) fn order_samplers(device: &ID3D12Device) {
     *table = Some(SamplerTable { index, first, tag, file: path.filter(|_| adds), _keep: keep });
 }
 
+/// The name of the fixed order made at the start (`None` before it is made).
+pub(crate) fn sampler_tag() -> Option<String> {
+    SAMPLERS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|t| t.tag.clone())
+}
+
 /// For a pipeline with static `samplers`: a name for the fixed order they
 /// all have a place in from the start (the pipeline may then be kept in the
 /// library under a name with it), or `None` (made, not kept). Samplers not

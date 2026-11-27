@@ -207,8 +207,11 @@ pub fn fingerprint() -> String {
     }
     // Pipelines with static samplers are other pipelines to the driver
     // when their samplers have fixed places.
+    // And by the order itself: a warm made before it was known (or under a
+    // shorter one) counts as not made.
     if super::library::sampler_order() {
         h.update(b"static samplers in a fixed order");
+        h.update(super::library::sampler_tag().unwrap_or_default().as_bytes());
     }
     h.finalize().to_hex()[..16].to_owned()
 }
