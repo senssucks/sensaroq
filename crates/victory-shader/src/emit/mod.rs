@@ -425,7 +425,7 @@ thread_local! {
 /// Runs `f` with `shader_opt()` overridden to `passes` on the current thread
 /// (tests only; restores the previous override on unwind).
 #[cfg(test)]
-pub(crate) fn with_shader_opt<R>(passes: u32, f: impl FnOnce() -> R) -> R {
+pub(crate) fn with_test_shader_opt<R>(passes: u32, f: impl FnOnce() -> R) -> R {
     struct Reset(Option<u32>);
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -464,7 +464,21 @@ pub fn translation_fingerprint() -> Vec<u8> {
     out.extend_from_slice(&compute_loop_limit().to_le_bytes());
     out.push(group_sync());
     out.extend_from_slice(&shader_opt().to_le_bytes());
+    out.push(u8::from(shader_opt_ext()));
     out
+}
+
+/// Whether the clean-up runs klbf-lab PR #41's extended passes
+/// (`VICTORY_SHADER_OPT_EXT=1`; off by default, the passes as before: on an
+/// RTX 5060 Ti the ports with them on gave a blown-out picture). Part of the
+/// translation's key.
+pub(crate) fn shader_opt_ext() -> bool {
+    #[cfg(test)]
+    if TEST_SHADER_OPT.with(std::cell::Cell::get).is_some() {
+        return true;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SHADER_OPT_EXT").is_some_and(|v| v == "1"))
 }
 
 /// `VICTORY_SHADER_OPT`'s value; every pass when it is unset or
@@ -1382,7 +1396,8 @@ mod tests {
         assert_eq!(parse_shader_opt(Some("0")), 0);
         assert_eq!(parse_shader_opt(Some(" 1 ")), 1);
         assert_eq!(parse_shader_opt(Some("0x1")), 1);
-        assert_eq!(parse_shader_opt(Some("127")), all);
+        assert_eq!(parse_shader_opt(Some("127")), 127);
+        assert_eq!(parse_shader_opt(Some("511")), all);
         assert_eq!(parse_shader_opt(Some("0xffffffff")), all);
         assert_eq!(parse_shader_opt(Some("on")), usual);
     }

@@ -105,7 +105,7 @@ fn placed_order() -> bool {
 
 /// Whether a fill behind a copy at its place in a list ([`place`]) that reads
 /// only bytes that copy put is given them from the copy's source instead
-/// (`VICTORY_PLACED_FORWARD`, on by default; `0`: off), see [`forward`]; and
+/// (`VICTORY_PLACED_FORWARD`, `=1`; off by default), see [`forward`]; and
 /// with it the steps ahead of such a copy are done in front of the lists
 /// whatever they read or write of its bytes, as `VICTORY_PLACED_ORDER=1` does
 /// (they are ahead of it in the order too).
@@ -116,7 +116,7 @@ fn placed_order() -> bool {
 /// had put: the whole submission was refused for it and stood 14-17 ms until
 /// the flights had landed (run rdna4-tuned-stage2, 0.5 waits a frame, 13.7 ms).
 fn forward_on() -> bool {
-    crate::toggled!("VICTORY_PLACED_FORWARD")
+    crate::asked_for!("VICTORY_PLACED_FORWARD")
 }
 
 /// Why [`plan`] refuses for [`place`].
@@ -679,8 +679,8 @@ enum To {
 }
 
 /// Whether the reads of a level are gathered by one dispatch for each buffer
-/// they read from instead of a copy each (`VICTORY_CARD_GATHER`, on by
-/// default; `0`: copies, as before).
+/// they read from instead of a copy each (`VICTORY_CARD_GATHER`, `=1`;
+/// off by default: copies, as before).
 ///
 /// Why: some 8,600 fills a frame, of a few hundred bytes each and seldom of
 /// the same bytes, were as many `CopyBufferRegion`s, on the queue the card
@@ -688,7 +688,7 @@ enum To {
 /// front end goes through on its own; the gather is one dispatch, a group of
 /// threads for each read.
 fn gather_on() -> bool {
-    crate::toggled!("VICTORY_CARD_GATHER")
+    crate::asked_for!("VICTORY_CARD_GATHER")
 }
 
 /// Fewer reads than this out of one buffer are copied.

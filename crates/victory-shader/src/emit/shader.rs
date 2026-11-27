@@ -558,8 +558,15 @@ impl Shader {
         // validator compares the flags with what the code uses).
         let passes = super::shader_opt() & super::bitcode::opt::MODULE;
         if passes != 0 {
-            self.m.optimise(passes);
-            let used = self.m.usage();
+            // klbf-lab PR #41's extended passes only with
+            // `VICTORY_SHADER_OPT_EXT=1` (off by default: the passes as before).
+            let used = if super::shader_opt_ext() {
+                self.m.optimise(passes);
+                self.m.usage()
+            } else {
+                self.m.optimise_b(passes);
+                self.m.usage_b()
+            };
             for (flag, used) in [
                 (flags::ROVS, used.rovs),
                 (flags::WAVE_OPS, used.wave_ops),

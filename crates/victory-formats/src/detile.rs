@@ -19,6 +19,17 @@
 //!    repeated OS thread creation while small mips run inline with zero
 //!    synchronization overhead.
 
+/// Whether [`crate::texture::Layout::detile`] and `tile` use this module's
+/// AVX2/SSE2 micro-tile kernels (`VICTORY_FAST_DETILE=1`; off by default:
+/// the walker as before). Tests use them always.
+pub fn fast() -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_FAST_DETILE").is_some_and(|v| v == "1"))
+}
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 

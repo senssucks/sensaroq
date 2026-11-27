@@ -65,6 +65,9 @@ fn build() -> [u8; 32] {
         for name in [
             // Colours and image stores with NaN made 0.
             "VICTORY_NAN_SCRUB",
+            // Fork ports, each off by default.
+            "VICTORY_SHADER_OPT_EXT",
+            "VICTORY_FRACT_NAN",
             "VICTORY_WAVE_WIDE",
             "VICTORY_WAVE_DEEP_SKIPS",
             "VICTORY_WAVE_OWN_BITS",

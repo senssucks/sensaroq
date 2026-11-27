@@ -5287,7 +5287,7 @@ mod tests {
         use super::*;
         use crate::emit::host::{Dispatch, Host, Root, View};
         use crate::emit::shader::Shader;
-        use crate::emit::{HostShader, lower, validator, with_shader_opt};
+        use crate::emit::{HostShader, lower, validator, with_test_shader_opt};
         use crate::native::{
             ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo,
             UsedResource,
@@ -5325,7 +5325,7 @@ mod tests {
             iters: u32,
         ) -> (HostShader, usize, usize, std::time::Duration) {
             let t0 = std::time::Instant::now();
-            let (dxil, inst_count, loop_insts) = with_shader_opt(passes, || {
+            let (dxil, inst_count, loop_insts) = with_test_shader_opt(passes, || {
                 let mut s = Shader::new(false);
                 s.threads = Some([64, 1, 1]);
                 s.user_data = 4;
@@ -5435,7 +5435,7 @@ mod tests {
                 let insts = s.m.census().counts[0] as usize;
                 let loop_insts = s.m.blocks[head].body.len();
                 // Finish with `passes = 0` so we don't optimise twice!
-                let dxil = with_shader_opt(0, || s.finish());
+                let dxil = with_test_shader_opt(0, || s.finish());
                 let _ = iters;
                 (dxil, insts, loop_insts)
             });
@@ -5464,7 +5464,7 @@ mod tests {
         /// Builds a realistic SM 6.6 LDS + redundant barrier + non-aliasing UAV store compute shader.
         fn build_lds_barrier_cs(passes: u32) -> (HostShader, usize, usize, std::time::Duration) {
             let t0 = std::time::Instant::now();
-            let (dxil, inst_count, loop_insts) = with_shader_opt(passes, || {
+            let (dxil, inst_count, loop_insts) = with_test_shader_opt(passes, || {
                 let mut s = Shader::new(false);
                 s.threads = Some([64, 1, 1]);
                 s.user_data = 4;
@@ -5537,7 +5537,7 @@ mod tests {
                 }
                 let insts = s.m.census().counts[0] as usize;
                 let loop_insts = s.m.blocks[head].body.len();
-                let dxil = with_shader_opt(0, || s.finish());
+                let dxil = with_test_shader_opt(0, || s.finish());
                 (dxil, insts, loop_insts)
             });
             let elapsed = t0.elapsed();
@@ -5648,7 +5648,7 @@ mod tests {
                 code,
             };
             let t0 = std::time::Instant::now();
-            let lowered = with_shader_opt(passes, || {
+            let lowered = with_test_shader_opt(passes, || {
                 let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
                 let st = structure::structure(&p).expect("structure");
                 let res = resource::track(&p, &native.layout, native.stage, Some(&st))
@@ -6044,7 +6044,7 @@ mod tests {
                     }),
                     code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
                 };
-                let lowered = with_shader_opt(passes, || {
+                let lowered = with_test_shader_opt(passes, || {
                     let p = ir::build(&native.code, native.wave64, native.vgprs).unwrap();
                     let st = structure::structure(&p).unwrap();
                     let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
@@ -6221,7 +6221,7 @@ mod tests {
                     }),
                     code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
                 };
-                let lowered = with_shader_opt(passes, || {
+                let lowered = with_test_shader_opt(passes, || {
                     let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
                     let st = structure::structure(&p).expect("structure");
                     let res = resource::track(&p, &native.layout, native.stage, Some(&st))
@@ -6467,7 +6467,7 @@ mod tests {
             // 5 -> 4 barriers) so even Windows 10 WARP without `WaveSize(32)` executes every lane & dword.
             let warp = Host::new(true).expect("Microsoft D3D12 WARP adapter required");
             let build_warp_rar_cs = |passes: u32| -> (HostShader, usize) {
-                let (dxil, barriers_left): (Vec<u8>, usize) = with_shader_opt(passes, || {
+                let (dxil, barriers_left): (Vec<u8>, usize) = with_test_shader_opt(passes, || {
                     let mut s = Shader::new(false);
                     s.threads = Some([64, 1, 1]);
                     s.user_data = 1;
@@ -6528,7 +6528,7 @@ mod tests {
                         .position(|&n| n == "barrier")
                         .unwrap();
                     let barriers_left = s.m.census().counts[b_idx] as usize;
-                    let dxil = with_shader_opt(0, || s.finish());
+                    let dxil = with_test_shader_opt(0, || s.finish());
                     (dxil, barriers_left)
                 });
                 validate_dxil(&dxil);
@@ -6714,7 +6714,7 @@ mod tests {
             };
             for (label, mask) in configs {
                 let t0 = std::time::Instant::now();
-                let lowered = with_shader_opt(mask, || {
+                let lowered = with_test_shader_opt(mask, || {
                     let p = ir::build(&wf_native.code, wf_native.wave64, wf_native.vgprs).unwrap();
                     let st = structure::structure(&p).unwrap();
                     let res =
