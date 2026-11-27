@@ -9,7 +9,7 @@
 //! wait, so what was the main of the place shows at once and whole.
 //!
 //! - `VICTORY_LOAD_COVER`: draws a frame waiting for their pipeline from
-//!   which the cover goes up (1000 by default; 0 never), and only if that is
+//!   which the cover goes up (0 by default: never; 1000 a good start), and only if that is
 //!   also [`SPIKE`] times as many as usual (the running mean of frames it
 //!   was down): play keeps a few hundred waiting a frame while it streams
 //!   in new things (session 2b: 170 dropped a frame), and 100 kept a gray
@@ -78,7 +78,7 @@ static UP_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
 
 fn threshold() -> u64 {
     static N: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *N.get_or_init(|| std::env::var("VICTORY_LOAD_COVER").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(1000))
+    *N.get_or_init(|| std::env::var("VICTORY_LOAD_COVER").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0))
 }
 
 fn longest() -> Duration {
