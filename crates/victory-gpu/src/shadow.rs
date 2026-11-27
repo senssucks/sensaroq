@@ -4546,7 +4546,12 @@ impl Shadow {
     /// Shaders store in it what is not declared: from here on only the dwords
     /// the title changes go up ([`by_address`]).
     pub(crate) fn keep_stores(&self) {
-        self.changes_only.store(true, Ordering::Relaxed);
+        // Only the words the title changes go up from here on: they are
+        // told by the CPU side, which a copy without one gets now
+        // ([`sideless`]; sending what it notes whole would put title bytes
+        // over the stores: session 26's faceless heads).
+        self.card_side();
+        self.changes_only.store(true, Ordering::Release);
     }
 
     /// Offsets `[from, to)` go up again whole, as the CPU's side has them.
@@ -4636,8 +4641,11 @@ impl Shadow {
     }
 
     /// Makes the CPU side of a copy in the card's memory that has none
-    /// ([`sideless`]): it takes title memory whole, and all of it goes up
-    /// again, so that the card's side and it hold the same. False if it
+    /// ([`sideless`]): it takes title memory whole, as a refresh would have,
+    /// and the pages written since their last refresh go up from it (what
+    /// went up before was title memory as it was then). Nothing else goes
+    /// up again: shaders may have stored in the card's side (session 26
+    /// sent all of it, over the stores of the faces' vertices). False if it
     /// cannot be made.
     pub(crate) fn card_side(&self) -> bool {
         let Some(card) = &self.card else { return true };
@@ -4653,12 +4661,30 @@ impl Shadow {
             return false;
         };
         crate::host::name(&buffer, || format!("title memory {:#x}+{:#x}, the CPU's side made late", self.start, self.len));
+        // The pages' marks first, then their bytes: a page written after
+        // the look goes up at its refresh, as any.
+        let start = self.start as usize;
+        let end = start + self.len as usize;
+        let stale: Vec<(usize, usize)> = match crate::watch::writes(start, end, true) {
+            Some((_, written)) => {
+                let copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
+                let base = start / PAGE;
+                written
+                    .into_iter()
+                    .filter(|&(page, w)| copied.get(page.wrapping_sub(base)).is_none_or(|&at| at == 0 || w > at))
+                    .map(|(page, _)| ((page * PAGE).max(start) - start, ((page + 1) * PAGE).min(end) - start))
+                    .filter(|r| r.0 < r.1)
+                    .collect()
+            }
+            // Nothing to tell what was written since: all of it.
+            None => vec![(0, self.len as usize)],
+        };
         crate::host::copy_mapped(data, self.start as *const u8, self.len as usize, false);
         let _ = card.staging.set(buffer);
         self.data.store(data, Ordering::Release);
         SIDES_MADE[0].fetch_add(1, Ordering::Relaxed);
         SIDES_MADE[1].fetch_add(card.size, Ordering::Relaxed);
-        self.card_changed(0, self.len as usize);
+        self.card_changed_runs(stale.into_iter());
         true
     }
 
