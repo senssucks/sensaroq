@@ -9695,6 +9695,24 @@ impl Meter {
                 if last.is_none_or(|t| t.elapsed().as_secs() >= 30) {
                     let since = last.map_or(0.0, |t| t.elapsed().as_secs_f64());
                     *last = Some(std::time::Instant::now());
+                    {
+                        use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+                        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+                        let mut c = PROCESS_MEMORY_COUNTERS { cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32, ..Default::default() };
+                        // SAFETY: our own process and a sized structure.
+                        unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
+                        let lists = LISTS.each_ref().map(|n| n.load(Ordering::Relaxed));
+                        tracing::info!(
+                            "process memory: {} MB in RAM (working set), {} MB private (committed), peak {} MB in RAM; host lists made {}, \
+                             preludes made {}, lists never reset {} (about 0.68 MB each with the driver's memory)",
+                            c.WorkingSetSize >> 20,
+                            c.PagefileUsage >> 20,
+                            c.PeakWorkingSetSize >> 20,
+                            lists[0],
+                            lists[1],
+                            lists[3]
+                        );
+                    }
                     let tally = crate::pipeline::take_drop_tally();
                     let all: u64 = tally.iter().map(|t| t.1).sum();
                     if all > 0 && since > 0.0 {
