@@ -254,6 +254,7 @@ pub extern "system" fn XApuEnqueueCommand(
         return INVALID_STREAM;
     }
     if state.queued[stream] >= connection.per_stream {
+        tally(4, 0);
         return QUEUE_FULL;
     }
     let mut result = ApuResult {
@@ -306,6 +307,16 @@ pub extern "system" fn XApuEnqueueCommand(
         }
         _ => return INVALID_COMMAND,
     }
+    match id.kind {
+        ACTIVATE => tally(0, 0),
+        PROCESS => tally(1, result.frames as u64),
+        _ => {}
+    }
+    if result.error == BAD_PACKET {
+        tally(2, 0);
+    } else if result.error != S_OK {
+        tally(3, 0);
+    }
     state.queued[stream] += 1;
     state.commands = state.commands.wrapping_add(1);
     state.results.push_back(result);
@@ -318,6 +329,52 @@ pub extern "system" fn XApuEnqueueCommand(
         unsafe { SetEvent(connection.event) };
     }
     S_OK
+}
+
+/// Activations, packets, bad packets, other errors, full queues, and
+/// frames decoded, logged every 30 s when packets came
+/// (`VICTORY_AUDIO_STATS=0`: no lines).
+fn tally(what: usize, frames: u64) {
+    struct Tally {
+        since: Option<std::time::Instant>,
+        counts: [u64; 5],
+        frames: u64,
+    }
+    static TALLY: Mutex<Tally> = Mutex::new(Tally {
+        since: None,
+        counts: [0; 5],
+        frames: 0,
+    });
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("VICTORY_AUDIO_STATS").map_or(true, |v| v.trim() != "0")) {
+        return;
+    }
+    let mut t = TALLY.lock().unwrap_or_else(|e| e.into_inner());
+    if what == 2 && t.counts[2] == 0 {
+        tracing::info!("Opus packet did not decode (first in this 30 s)");
+    }
+    t.counts[what] += 1;
+    t.frames += frames;
+    let since = *t.since.get_or_insert_with(std::time::Instant::now);
+    if since.elapsed().as_secs() >= 30 {
+        let [activated, packets, bad, errors, full] = t.counts;
+        if packets + bad + errors + full > 0 {
+            tracing::info!(
+                activated,
+                packets,
+                bad_packets = bad,
+                other_errors = errors,
+                queue_full = full,
+                seconds_decoded = t.frames as f64 / 48_000.0,
+                "Opus decoding, last 30 s"
+            );
+        }
+        *t = Tally {
+            since: Some(std::time::Instant::now()),
+            counts: [0; 5],
+            frames: 0,
+        };
+    }
 }
 
 /// Decodes one packet into the command's output buffer, keeping the frames

@@ -59,6 +59,7 @@ pub struct Status {
 
 pub struct Stream {
     dsp: *mut Dsp,
+    kind: u32,
     frames: u32,
     channels: u32,
     status: Box<Status>,
@@ -148,13 +149,23 @@ pub extern "system" fn XDspActivate(
         return E_INVALIDARG;
     }
     let (kind, options, frames, channels) = (desc.kind, desc.options, desc.frames, desc.channels);
-    tracing::debug!(
-        kind,
-        options,
-        frames,
-        channels,
-        "audio DSP stream activated"
-    );
+    {
+        static TOLD: Mutex<u32> = Mutex::new(0);
+        let mut told = TOLD.lock().unwrap_or_else(|e| e.into_inner());
+        if *told < 32 {
+            *told += 1;
+            let ir_floats = desc.ir_floats;
+            tracing::info!(
+                kind,
+                options,
+                frames,
+                channels,
+                ir_floats,
+                dry = dry(),
+                "audio DSP stream activated (first 32; its output is silence unless VICTORY_DSP_DRY=1)"
+            );
+        }
+    }
     {
         // SAFETY: a connection from `XDspConnectWithMaximumStreamLimit`.
         let dsp = unsafe { &*dsp };
@@ -166,6 +177,7 @@ pub extern "system" fn XDspActivate(
     }
     let new = Box::new(Stream {
         dsp,
+        kind: desc.kind,
         frames: desc.frames,
         channels: desc.channels,
         status: Box::new(Status {
@@ -195,6 +207,68 @@ pub extern "system" fn XDspDeactivate(stream: *mut Stream) -> HRESULT {
     S_OK
 }
 
+/// `VICTORY_DSP_DRY=1` (default 0): a convolution's output is its input
+/// times the command's first gain, as if the impulse response were one
+/// click, so a voice sent only through the DSP is heard (dry, without its
+/// reverb or filter) instead of being silent. Assumes the input block has
+/// the output's layout.
+fn dry() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VICTORY_DSP_DRY").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// What the streams were given, every 30 s: blocks by kind, and how many
+/// had a sound in them (a peak over 1/1000), which is what we leave silent.
+struct Stats {
+    since: Option<std::time::Instant>,
+    /// Convolution, other transforms: blocks, blocks with sound, loudest.
+    blocks: [u32; 2],
+    heard: [u32; 2],
+    peak: [f32; 2],
+    gains: [f32; 2],
+}
+
+static STATS: Mutex<Stats> = Mutex::new(Stats {
+    since: None,
+    blocks: [0; 2],
+    heard: [0; 2],
+    peak: [0.0; 2],
+    gains: [0.0; 2],
+});
+
+fn count(kind: u32, input: &[f32], gains: [f32; 2]) {
+    let peak = input
+        .iter()
+        .fold(0f32, |m, &x| if x.is_finite() { m.max(x.abs()) } else { m });
+    let mut s = STATS.lock().unwrap_or_else(|e| e.into_inner());
+    let k = usize::from(kind != CONVOLUTION);
+    s.blocks[k] += 1;
+    s.heard[k] += u32::from(peak > 1e-3);
+    s.peak[k] = s.peak[k].max(peak);
+    s.gains[k] = s.gains[k].max(gains[0].abs().max(gains[1].abs()));
+    let since = *s.since.get_or_insert_with(std::time::Instant::now);
+    if since.elapsed().as_secs() >= 30 {
+        tracing::info!(
+            convolution_blocks = s.blocks[0],
+            with_sound = s.heard[0],
+            peak = s.peak[0],
+            gain = s.gains[0],
+            other_blocks = s.blocks[1],
+            other_with_sound = s.heard[1],
+            other_peak = s.peak[1],
+            dry = dry(),
+            "audio DSP, last 30 s (outputs are silence unless VICTORY_DSP_DRY=1)"
+        );
+        *s = Stats {
+            since: Some(std::time::Instant::now()),
+            blocks: [0; 2],
+            heard: [0; 2],
+            peak: [0.0; 2],
+            gains: [0.0; 2],
+        };
+    }
+}
+
 /// Completes the command at once: its output block is silence.
 pub extern "system" fn XDspSubmitCommand(
     stream: *mut Stream,
@@ -206,10 +280,32 @@ pub extern "system" fn XDspSubmitCommand(
     }
     // SAFETY: a stream from `XDspActivate`, the title's command.
     let (stream, command) = unsafe { (&mut *stream, &*command) };
+    if !command.input.is_null() {
+        // SAFETY: the title's input holds at least one channel's block.
+        let input = unsafe { std::slice::from_raw_parts(command.input, stream.frames as usize) };
+        count(stream.kind, input, command.gains);
+    }
     if !command.output.is_null() {
         let samples = (stream.frames * stream.channels) as usize;
-        // SAFETY: the title's output buffer holds one block of the stream.
-        unsafe { std::ptr::write_bytes(command.output, 0, samples) };
+        if dry() && stream.kind == CONVOLUTION && !command.input.is_null() {
+            let gain = command.gains[0];
+            for n in 0..samples {
+                // SAFETY: input and output blocks of the stream, assumed the
+                // same layout (see `dry`); read before written, so one
+                // buffer for both is fine.
+                unsafe {
+                    let i = command.input.add(n).read_unaligned();
+                    command.output.add(n).write_unaligned(if i.is_finite() {
+                        i * gain
+                    } else {
+                        0.0
+                    });
+                }
+            }
+        } else {
+            // SAFETY: the title's output buffer holds one block of the stream.
+            unsafe { std::ptr::write_bytes(command.output, 0, samples) };
+        }
     }
     let status = &mut *stream.status;
     let next = status.submitted.wrapping_add(1);

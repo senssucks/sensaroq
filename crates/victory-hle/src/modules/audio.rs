@@ -466,6 +466,9 @@ impl Xma {
             input_bits = context.field(0, 0, 12) * xma::PACKET_BYTES as u32 * 8,
             "XMA voice disabled"
         );
+        let rate = context.field(1, 27, 2) as usize;
+        let words: Vec<String> = (0..10).map(|w| format!("{:08x}", context.get(w))).collect();
+        summarize(rate, context.channels(), t, &words);
     }
 
     /// Moves the title's read block on, which frees output space.
@@ -497,9 +500,10 @@ impl Xma {
         let start = Instant::now();
         let mut active = 0;
         for index in 0..self.voices.len() as u32 {
-            if let (Some(context), Some(voice)) =
-                (self.context(index), &mut *lock(&self.voices[index as usize]))
-            {
+            if let (Some(context), Some(voice)) = (
+                self.context(index),
+                &mut *lock(&self.voices[index as usize]),
+            ) {
                 pump(context, voice);
                 active += 1;
             }
@@ -509,6 +513,111 @@ impl Xma {
             tracing::debug!(active, ms = took.as_millis(), "slow XMA decoding pass");
         }
     }
+}
+
+/// What XMA voices did, by sample rate and channels, since the last line.
+#[derive(Default, Clone, Copy)]
+struct Kind {
+    voices: u32,
+    /// Peak under 16 of 32768: nothing to hear.
+    silent: u32,
+    /// Some frames did not decode, and how many in all.
+    with_bad: u32,
+    bad_frames: u32,
+    frames: u32,
+    /// The title never took a block from the ring.
+    never_taken: u32,
+    /// Decoded samples the title never took (per channel).
+    left: usize,
+    ms: u128,
+}
+
+struct Summary {
+    since: Option<Instant>,
+    kinds: [[Kind; 2]; 4],
+    /// Voices with bad frames or nothing written, logged one by one.
+    told: u32,
+}
+
+static SUMMARY: Mutex<Summary> = Mutex::new(Summary {
+    since: None,
+    kinds: [[Kind {
+        voices: 0,
+        silent: 0,
+        with_bad: 0,
+        bad_frames: 0,
+        frames: 0,
+        never_taken: 0,
+        left: 0,
+        ms: 0,
+    }; 2]; 4],
+    told: 0,
+});
+
+/// Counts a disabled voice, and every 30 s logs what voices of each kind
+/// did (`VICTORY_AUDIO_STATS=0`: no lines). A kind whose voices are all
+/// silent or full of bad frames is one we do not play.
+fn summarize(rate: usize, channels: usize, t: &Trace, words: &[String]) {
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("VICTORY_AUDIO_STATS").map_or(true, |v| v.trim() != "0")) {
+        return;
+    }
+    const RATES: [u32; 4] = [24_000, 32_000, 44_100, 48_000];
+    let mut s = lock(&SUMMARY);
+    let ms = t.since.elapsed().as_millis();
+    let taken = t.taken * SAMPLES_PER_BLOCK / channels;
+    let odd = t.bad_frames > 0 || (t.produced == 0 && ms > 100);
+    if odd && s.told < 24 {
+        s.told += 1;
+        tracing::info!(
+            rate = RATES[rate & 3],
+            channels,
+            ms,
+            frames = t.frames,
+            bad_frames = t.bad_frames,
+            produced = t.produced,
+            taken,
+            peak = t.peak,
+            input_ended_ms = ?t.ended_ms,
+            words = ?words,
+            "XMA voice played little or nothing (first 24 such voices)"
+        );
+    }
+    let k = &mut s.kinds[rate & 3][(channels - 1).min(1)];
+    k.voices += 1;
+    k.silent += u32::from(t.peak < 16);
+    k.with_bad += u32::from(t.bad_frames > 0);
+    k.bad_frames += t.bad_frames;
+    k.frames += t.frames;
+    k.never_taken += u32::from(t.takes == 0);
+    k.left += t.produced.saturating_sub(taken);
+    k.ms += ms;
+    let since = *s.since.get_or_insert_with(Instant::now);
+    if since.elapsed().as_secs() < 30 {
+        return;
+    }
+    for (r, by_channels) in s.kinds.iter().enumerate() {
+        for (c, k) in by_channels.iter().enumerate() {
+            if k.voices == 0 {
+                continue;
+            }
+            tracing::info!(
+                rate = RATES[r],
+                channels = c + 1,
+                voices = k.voices,
+                silent = k.silent,
+                with_bad_frames = k.with_bad,
+                bad_frames = k.bad_frames,
+                frames = k.frames,
+                never_taken = k.never_taken,
+                mean_ms = (k.ms / k.voices as u128) as u64,
+                left_untaken = k.left,
+                "XMA voices ended, last 30 s"
+            );
+        }
+    }
+    s.kinds = [[Kind::default(); 2]; 4];
+    s.since = Some(Instant::now());
 }
 
 fn pump(context: Context, voice: &mut Voice) {
@@ -679,7 +788,10 @@ fn dump_input(index: u32, context: Context) {
     );
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(dir.join(format!("{n:02}-{index}.ctx")), words);
-    let _ = std::fs::write(dir.join(format!("{n:02}-{index}.xma")), input.unwrap_or_default());
+    let _ = std::fs::write(
+        dir.join(format!("{n:02}-{index}.xma")),
+        input.unwrap_or_default(),
+    );
 }
 
 /// Starts the decoding thread on the first enabled voice, and has it fill
@@ -1189,7 +1301,10 @@ mod tests {
         // Blocks 2, 3 and 0 written (silence), 1 left for the title, and
         // nothing past the ring.
         assert_eq!((write, writable), (1, 0));
-        assert!(ring[0x400..].iter().all(|&b| b == 0x55), "written past the ring");
+        assert!(
+            ring[0x400..].iter().all(|&b| b == 0x55),
+            "written past the ring"
+        );
         let block = |n: usize| &ring[n * 0x100..(n + 1) * 0x100];
         assert!([0, 2, 3].iter().all(|&n| block(n).iter().all(|&b| b == 0)));
         assert!(block(1).iter().all(|&b| b == 0x55));
