@@ -293,6 +293,7 @@ A tree of other people's work with a little on top; the history is kept.
   **[DexNom/VIctory](https://github.com/DexNom/VIctory)**,
   **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**
   and the others foxhound's README names.
+- Changes ported from other forks since, each with its source and author: [CREDITS.md](CREDITS.md).
 - Everyone who sent pull requests to this fork before the move; that work is
   in the history, on the branch that was `main` until then.
 - NVIDIA Streamline, DLSS and Reflex are NVIDIA's; they are loaded at run time
