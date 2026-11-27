@@ -65,5 +65,7 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [ZigZagBoi1/ScarlettPort PR #72](https://github.com/ZigZagBoi1/ScarlettPort/pull/72) | The write-watch journal finds asked-ahead ranges by binary search | FictionHub |
 | [ZigZagBoi1/ScarlettPort PR #86](https://github.com/ZigZagBoi1/ScarlettPort/pull/86) | Loose windows looked up under the shared lock | aswdffdas-sudo |
 | [TaynanGT/Vice-Tay PR #191](https://github.com/TaynanGT/Vice-Tay/pull/191) | AVX2/SSE2 micro-tile texture detiler and worker pool (1.6-4.6x on large textures) | Vladimir |
+| [DoubleGhosty/cool_fox PR #47](https://github.com/DoubleGhosty/cool_fox/pull/47) | Title memory reads zero only the bytes no run covers | Esteban Viera |
+| [DoubleGhosty/cool_fox PR #49](https://github.com/DoubleGhosty/cool_fox/pull/49) | Per-draw maps keyed by address use AddressHash, not SipHash | Esteban Viera |
 
 The NVIDIA fork watch that finds these lives in the project notes. New ports are added here as they land.
