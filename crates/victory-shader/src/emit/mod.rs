@@ -315,13 +315,13 @@ pub fn builder_fences() -> bool {
 
 /// Whether a load by address in a program that walks the title's structures
 /// takes the copy an earlier load of the same 64 KiB page found, without a
-/// look in the directory of its own (`lower.rs` `memory_near`;
-/// `VICTORY_MEMORY_NEAR=0`: every load looks). The same bytes are read
-/// either way: the switch is for measuring what the looks cost. Part of the
-/// translation: the shader cache keys on it.
+/// look in the directory of its own (`lower.rs` `memory_near`; only with
+/// `VICTORY_MEMORY_NEAR=1`, off by default here: every load looks, as
+/// before). The same bytes are read either way. Part of the translation:
+/// the shader cache keys on it.
 pub fn memory_near() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_MEMORY_NEAR").is_none_or(|v| v != "0"))
+    *ON.get_or_init(|| std::env::var_os("VICTORY_MEMORY_NEAR").is_some_and(|v| v == "1"))
 }
 
 /// Whether the structure builder's accesses through its root views stay near
