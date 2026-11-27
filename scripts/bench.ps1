@@ -22,8 +22,9 @@ param(
 $play = Join-Path $PSScriptRoot 'play-foxhound.ps1'
 $summary = Join-Path $PSScriptRoot 'log_summary.py'
 $logs = Join-Path $env:LOCALAPPDATA 'victory\logs'
-$python = Get-Command python -ErrorAction SilentlyContinue
-if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
+# py (the Python launcher) first: 'python' is often only the Microsoft Store's stand-in in WindowsApps.
+$python = Get-Command py -ErrorAction SilentlyContinue
+if (-not $python) { $python = Get-Command python -ErrorAction SilentlyContinue | Where-Object { $_.Source -notmatch 'WindowsApps' } | Select-Object -First 1 }
 $made = @()
 foreach ($variant in $Variants) {
     $pairs = @($variant -split ';' | Where-Object { $_ -match '=' } | ForEach-Object {
