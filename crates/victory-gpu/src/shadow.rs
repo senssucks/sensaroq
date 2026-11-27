@@ -5599,10 +5599,27 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
             shadow.unsized_asks.fetch_add(1, Ordering::Relaxed);
         }
     };
+    // The window that serves the ask, by what `map` holds (the same choice
+    // under the shared lock and under the writer's).
+    let pick = |map: &BTreeMap<(u64, u64), Arc<Shadow>>| {
+        if unsized_ask && tails() {
+            let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
+            longest_tail(there, address, end).unwrap_or_else(|| tail_of(address, end))
+        } else if any && fine() && !unsized_ask {
+            let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
+            holder(there, address, end).unwrap_or(named)
+        } else {
+            named
+        }
+    };
     // The window is there already (nearly always): readers share the lock.
-    if !(unsized_ask && tails()) && !(any && fine() && !unsized_ask) {
+    // With tails or a finer grid this was the writer's lock for every ask,
+    // and the recording threads took turns at it (timeline run 2026-11-26
+    // 21:5x: 107 ms of waits a recording at this lock, inside the indirect
+    // draws' preparing, the slowest frames 70-180 ms).
+    {
         let map = LOOSE.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(shadow) = map.get(&named) {
+        if let Some(shadow) = map.get(&pick(&map)) {
             note(shadow);
             return Some(shadow.clone());
         }
