@@ -149,7 +149,8 @@ pub(crate) fn critical_commit() -> bool {
 /// A soft per-frame admission limit. A single texture can cross it. The
 /// queue retains unserved slots so they can be retried on later frames.
 /// What a frame's texture pass may stage while host memory is pressed:
-/// `VICTORY_PRESSURED_PREFETCH_MB`, 256 by default (it was 64). On a 32 GB
+/// `VICTORY_PRESSURED_PREFETCH_MB`, unset or 0: no cut, the frame's whole
+/// budget, as Skylar asked (it was 64 MB). On a 32 GB
 /// PC the game leaves under 3 GB free from its first minute on, so the
 /// pressure never lifts, and at 64 MB a frame a new place's 20,000 textures
 /// took about two minutes to come in (void around the player; session 6:
@@ -157,7 +158,7 @@ pub(crate) fn critical_commit() -> bool {
 /// run (53 MB alive at once in that session).
 fn pressured_prefetch_bytes() -> u64 {
     static MB: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *MB.get_or_init(|| std::env::var("VICTORY_PRESSURED_PREFETCH_MB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(256).max(16)) << 20
+    *MB.get_or_init(|| std::env::var("VICTORY_PRESSURED_PREFETCH_MB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)) << 20
 }
 
 pub(crate) fn prefetch_limit(bytes: u64, pressure: bool, critical: bool, limited: bool, staging: u64) -> u64 {
@@ -166,7 +167,11 @@ pub(crate) fn prefetch_limit(bytes: u64, pressure: bool, critical: bool, limited
     } else if limited && staging >= GIB {
         bytes.min(64 << 20)
     } else if pressure {
-        bytes.min(pressured_prefetch_bytes())
+        // 0 (the default): no cut, the frame's whole budget.
+        match pressured_prefetch_bytes() {
+            0 => bytes,
+            cap => bytes.min(cap.max(16 << 20)),
+        }
     } else {
         bytes
     }
@@ -208,7 +213,7 @@ mod tests {
         assert_eq!(prefetch_limit(512 << 20, false, false, false, 2 * GIB), 512 << 20);
         assert_eq!(prefetch_limit(0, true, true, false, 0), 0);
         assert_eq!(prefetch_limit(8 << 20, true, true, false, 0), 8 << 20);
-        assert_eq!(prefetch_limit(512 << 20, true, false, false, 0), 256 << 20);
+        assert_eq!(prefetch_limit(512 << 20, true, false, false, 0), 512 << 20);
         assert_eq!(prefetch_limit(512 << 20, true, true, false, 0), 16 << 20);
         assert_eq!(prefetch_limit(192 << 20, false, false, false, 0), 192 << 20);
     }
