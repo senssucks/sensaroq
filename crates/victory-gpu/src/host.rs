@@ -80,6 +80,12 @@ static RETIRED: [Mutex<std::collections::VecDeque<(u64, Retired)>>; RETIRED_SHAR
     [const { Mutex::new(std::collections::VecDeque::new()) }; RETIRED_SHARDS];
 
 fn retired_shard() -> &'static Mutex<std::collections::VecDeque<(u64, Retired)>> {
+    // Sixteen queues only with `VICTORY_RETIRED_SHARDS=1` (trustno1-coder
+    // #139; off by default: one queue, as before).
+    static SHARDED: OnceLock<bool> = OnceLock::new();
+    if !*SHARDED.get_or_init(|| std::env::var_os("VICTORY_RETIRED_SHARDS").is_some_and(|v| v == "1")) {
+        return &RETIRED[0];
+    }
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     thread_local! {
         static INDEX: usize = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) & (RETIRED_SHARDS - 1);
