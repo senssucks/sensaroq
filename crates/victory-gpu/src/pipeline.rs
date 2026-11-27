@@ -581,6 +581,57 @@ fn copy(stage: &'static str, code: &Bytecode) -> Option<Arc<Shader>> {
     }))
 }
 
+/// A compute pipeline of a console program given in pieces, as device
+/// method 0x218 gives them (`crate::device`): the pipeline's register packet,
+/// its hash, the GFX10 code and the program's metadata, which are the
+/// entries 0, 1, 6 and 7 of an `FSPX` blob. They are put in such a blob, in
+/// a container's `ACCC` part, and made as the FidelityFX upscaler's
+/// containers are (`victory_shader::native::fspx_program`).
+#[cfg(windows)]
+pub(crate) fn compute_from_pieces(packet: &[u8], hash: &[u8], code: &[u8], meta: &[u8], iid: *const Iid, out: *mut This) -> HRESULT {
+    let container = fspx_container(&[(0, packet), (1, hash), (6, code), (7, meta)]);
+    hand_out(vec![shader("compute", &container)], None, iid, out)
+}
+
+/// A `DXBC` container of one `ACCC` part holding an `FSPX` blob of
+/// `entries` (kind, bytes).
+pub(crate) fn fspx_container(entries: &[(u32, &[u8])]) -> Vec<u8> {
+    let le = |v: &mut Vec<u8>, x: u32| v.extend_from_slice(&x.to_le_bytes());
+    let header = 0x10 + 16 * entries.len();
+    let mut blob = Vec::new();
+    blob.extend_from_slice(b"FSPX");
+    le(&mut blob, 1);
+    le(&mut blob, entries.len() as u32);
+    le(&mut blob, 0);
+    let mut at = header;
+    for (kind, bytes) in entries {
+        le(&mut blob, *kind);
+        le(&mut blob, at as u32);
+        le(&mut blob, bytes.len() as u32);
+        le(&mut blob, 0);
+        at += bytes.len().next_multiple_of(4);
+    }
+    for (_, bytes) in entries {
+        blob.extend_from_slice(bytes);
+        blob.resize(blob.len().next_multiple_of(4), 0);
+    }
+    let size = blob.len() as u32;
+    blob[12..16].copy_from_slice(&size.to_le_bytes());
+    // DXBC: magic, digest (none), version 1.0, size, one part at 0x24.
+    let mut c = Vec::new();
+    c.extend_from_slice(b"DXBC");
+    c.extend_from_slice(&[0; 16]);
+    c.extend_from_slice(&1u16.to_le_bytes());
+    c.extend_from_slice(&0u16.to_le_bytes());
+    le(&mut c, (0x24 + 8 + blob.len()) as u32);
+    le(&mut c, 1);
+    le(&mut c, 0x24);
+    c.extend_from_slice(b"ACCC");
+    le(&mut c, blob.len() as u32);
+    c.extend_from_slice(&blob);
+    c
+}
+
 fn hand_out(
     shaders: Vec<Arc<Shader>>,
     #[cfg(windows)] graphics: Option<Box<host::GraphicsState>>,

@@ -371,6 +371,16 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
     }
     #[cfg(windows)]
     save_pipeline_description(SLOT, calls, desc as usize);
+    // 0x218: a compute pipeline in console pieces (`fspx_pieces`).
+    #[cfg(windows)]
+    if SLOT == 0x218 && crate::toggled!("VICTORY_FSPX_PIPELINES") && let Some(pieces) = fspx_pieces(desc as usize) {
+        let [packet, hash, code, meta] = pieces.each_ref().map(Vec::as_slice);
+        let hr = crate::pipeline::compute_from_pieces(packet, hash, code, meta, _iid, out);
+        if calls <= 4 || calls.is_power_of_two() {
+            tracing::info!(calls, hr = format_args!("{:#x}", hr), code_bytes = code.len(), "device method 0x218: a compute pipeline made of console pieces (VICTORY_FSPX_PIPELINES=0: not)");
+        }
+        return hr;
+    }
     if calls <= 4 || calls.is_power_of_two() {
         // Sixteen 64-bit words at `at`, read through the kernel: neither
         // pointer is known to be mapped.
@@ -412,6 +422,30 @@ extern "system" fn removed_reason(_: This) -> HRESULT {
         }
     }
     S_OK
+}
+
+/// What device method 0x218's description names, read through the kernel:
+/// `(root signature, packet, 0x1c, hash, 0x14, code, its size, metadata,
+/// its size, ...)` in 64-bit words, the packet and metadata as an `FSPX`
+/// blob's entries 0 and 7 hold them (sessions 1 of 2026-11-27: 48 calls, code
+/// of 0x140-0xac0 bytes in the title's graphics memory, metadata 0x403 with
+/// the code's dwords at +8). `None` if anything is not as that.
+#[cfg(windows)]
+fn fspx_pieces(desc: usize) -> Option<[Vec<u8>; 4]> {
+    let read = |at: usize, len: usize| -> Option<Vec<u8>> {
+        let mut bytes = vec![0u8; len];
+        (at != 0 && crate::host::read_into(at as *const u8, &mut bytes)).then_some(bytes)
+    };
+    let head = read(desc, 9 * 8)?;
+    let w: Vec<usize> = head.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c) as usize).collect();
+    let (packet_len, hash_len, code_len, meta_len) = (w[2], w[4], w[6], w[8]);
+    if packet_len != 0x1c || hash_len != 0x14 || !(4..=1 << 20).contains(&code_len) || !(0x18..=1 << 16).contains(&meta_len) {
+        return None;
+    }
+    let [packet, hash, code, meta] = [(w[1], packet_len), (w[3], hash_len), (w[5], code_len), (w[7], meta_len)].map(|(at, len)| read(at, len));
+    let (packet, hash, code, meta) = (packet?, hash?, code?, meta?);
+    let dwords = u32::from_le_bytes(meta[8..12].try_into().ok()?) as usize;
+    (u32::from_le_bytes(meta[0..4].try_into().ok()?) == 0x403 && dwords * 4 == code.len()).then_some([packet, hash, code, meta])
 }
 
 /// HybridGt diagnostic, `VICTORY_SAVE_PIPELINES=<dir>`: the first 48 calls of
