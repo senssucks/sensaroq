@@ -5999,6 +5999,7 @@ impl Host {
         stage.next("submit: the lists' steps");
         for list in runs {
             list.run_deferred(&mut batch, &air, |i| own.as_ref().is_some_and(|own| own.takes(list, i)));
+            let preluding = std::time::Instant::now();
             firsts.push(lists.len());
             // (None unless `VICTORY_PRELUDE_UPLOADS=1`.)
             let uploads = list.prelude_uploads(&mut batch);
@@ -6006,6 +6007,7 @@ impl Host {
                 lists.push(Some(prelude));
             }
             lists.push(list.list.cast().ok());
+            OTHER_STEPS[3].fetch_add(preluding.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
         batch.fill();
         stage.next("submit: the last refreshes");
@@ -7976,7 +7978,9 @@ impl HostList {
                         }
                     }
                     let _step = crate::timeline::span("a step of ours");
+                    let ran = std::time::Instant::now();
                     work();
+                    OTHER_STEPS[0].fetch_add(ran.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     // It wrote title memory, where is not known here: the
                     // submission's one asking ends, later refreshes ask anew.
                     if matches!(step, Step::Run(_)) {
@@ -7995,10 +7999,12 @@ impl HostList {
                     // the next flush of all (flushing all of them at every
                     // range a dispatch writes made thousands of write-watch
                     // askings a frame).
+                    let began = std::time::Instant::now();
                     batch.flush_one(shadow);
                     #[cfg(feature = "diagnostics")]
                     let snapshot = std::time::Instant::now();
                     shadow.writing(*address, *len);
+                    OTHER_STEPS[1].fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     #[cfg(feature = "diagnostics")]
                     {
                         add(C::GpuWrites, 1);
@@ -8007,6 +8013,8 @@ impl HostList {
                     continue;
                 }
                 Step::Texture(staging) => {
+                    let began = std::time::Instant::now();
+                    let _counted = TimeTo(&OTHER_STEPS[2], began);
                     if batch.texture_due(staging) {
                         batch.due.push(staging.clone());
                         if !wide_textures() {
@@ -8098,6 +8106,22 @@ static FLUSHES: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::
 /// asking whether a copy has anything new, and bringing copies up to date.
 static REFRESH_WORK: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
 
+/// Since the last frame-rate line, nanoseconds of the submitting thread in
+/// the lists' steps other than copies, fills and refreshes: steps of ours
+/// (`Step::Run`, `Step::Host`), ranges shaders write (`Step::GpuWrite`, with
+/// the refresh of that copy before), textures (`Step::Texture`), and the
+/// preludes and the lists gathered after each list's steps.
+static OTHER_STEPS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+/// Adds the time since its start to a counter when dropped.
+struct TimeTo<'a>(&'a std::sync::atomic::AtomicU64, std::time::Instant);
+
+impl Drop for TimeTo<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(self.1.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+}
+
 /// `shadow.nothing_new`, its time counted in [`REFRESH_WORK`].
 fn nothing_new_timed(shadow: &crate::shadow::Shadow, from: usize, len: usize) -> bool {
     let started = std::time::Instant::now();
@@ -8168,6 +8192,7 @@ fn submit_split_line(frames: f64) {
     let all: f64 = [0, 1, 2, 3, 4, 5, 11, 12, 13, 14, 15].iter().map(|&i| ms[i]).sum();
     let waited = crate::pipeline::take_waited();
     let work = [0, 1].map(|i| REFRESH_WORK[i].swap(0, Ordering::Relaxed) as f64 / 1e6 / frames);
+    let other = [0, 1, 2, 3].map(|i| OTHER_STEPS[i].swap(0, Ordering::Relaxed) as f64 / 1e6 / frames);
     if all + after <= 0.0 {
         return;
     }
@@ -8180,7 +8205,9 @@ fn submit_split_line(frames: f64) {
          submission lock, {:.1} planning steps done on the card, {:.1} waiting for flights, {:.1} the heaps' records and what is \
          swept; at the end {:.1} waiting for the heaps' records; after the sending {after:.1} (the flight noted, landed lists \
          reset and given back); waiting for pipelines being made, all threads: {:.1} (passes over the screen {:.1}); \
-         the refreshes' work, all threads: {:.1} asking whether a copy has anything new, {:.1} bringing copies up to date",
+         the refreshes' work, all threads: {:.1} asking whether a copy has anything new, {:.1} bringing copies up to date; \
+         in the lists' steps besides: {:.1} steps of ours, {:.1} ranges shaders write (their copy's refresh first), {:.1} \
+         textures, {:.1} preludes and gathering the lists",
         ms[0],
         ms[8],
         ms[1],
@@ -8206,6 +8233,10 @@ fn submit_split_line(frames: f64) {
         waited[1] as f64 / 1e6 / frames,
         work[0],
         work[1],
+        other[0],
+        other[1],
+        other[2],
+        other[3],
     );
     let [first, again] = [0, 1].map(|i| HEAP_SYNC_FIRST[i].swap(0, Ordering::Relaxed) as f64 / frames);
     if first + again > 0.0 {
