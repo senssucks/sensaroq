@@ -346,6 +346,13 @@ pub(crate) fn mapped_at(device: &ID3D12Device, at: &'static std::panic::Location
     Ok(())
 }
 
+/// The submitting thread's sends to copies in the card's memory
+/// (`Host::card_before`), since the last line, in every build: nanoseconds
+/// gathering what changed, from there to the taking (hashes made, the
+/// "before"s), taking the bytes out (`send::take`), and the changed ranges
+/// gathered. For the 30 s line: which part to hand to other threads.
+pub(crate) static CARD_BEFORE_NS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
 /// Times, microseconds and the longest of [`mapped`].
 static MAPPED: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
@@ -4676,6 +4683,7 @@ impl Host {
     /// `relay`).
     /// `picked`: ranges that may be written too, and ranges to look at
     /// (`crate::picked`).
+    #[allow(clippy::too_many_lines)]
     fn card_before(&self, declared: &[Declared], picked: &crate::picked::Ranges, flown: bool) -> Option<CardPlan> {
         use std::sync::Arc;
         if !crate::shadow::cards() {
@@ -4714,7 +4722,10 @@ impl Host {
             None => 0,
         };
         let gathering = crate::timeline::span("copies in the card's memory: what changed");
+        let began = std::time::Instant::now();
         let mut dirty = crate::shadow::card_dirty(sent_as);
+        CARD_BEFORE_NS[0].fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        CARD_BEFORE_NS[3].fetch_add(dirty.iter().map(|d| d.1.len() as u64).sum(), Ordering::Relaxed);
         gathering.end();
         if declared.is_empty() && dirty.is_empty() && looked.is_empty() {
             return None;
@@ -4746,7 +4757,10 @@ impl Host {
         let mut looks = None;
         // The bytes as they are now, whatever later submissions put there.
         let taking = crate::timeline::span("copies in the card's memory: taken");
+        let took = std::time::Instant::now();
+        CARD_BEFORE_NS[1].fetch_add((took - began).as_nanos() as u64, Ordering::Relaxed);
         let own = if send::own() { send::take(self, &dirty) } else { None };
+        CARD_BEFORE_NS[2].fetch_add(took.elapsed().as_nanos() as u64, Ordering::Relaxed);
         taking.end();
         if !dirty.is_empty() {
             let Some(sync) = work.sync.pop().or_else(|| self.make_prelude()) else {
@@ -9895,6 +9909,16 @@ impl Meter {
                             asked >> 20,
                             crate::shadow::WINDOW_CARD_BYTES.load(Ordering::Relaxed) >> 20,
                             crate::shadow::WINDOW_MAPPED_BYTES.load(Ordering::Relaxed) >> 20
+                        );
+                    }
+                    let [gather, between, take, ranges] = CARD_BEFORE_NS.each_ref().map(|n| n.swap(0, Ordering::Relaxed));
+                    if since > 0.0 {
+                        tracing::info!(
+                            "sends to copies in the card's memory, last {since:.0} s, on the submitting thread: {:.0} ms gathering what \
+                             changed ({ranges} ranges), {:.0} ms from there to the taking, {:.0} ms taking the bytes out",
+                            gather as f64 / 1e6,
+                            between as f64 / 1e6,
+                            take as f64 / 1e6
                         );
                     }
                     let making = take_making();
