@@ -1372,7 +1372,32 @@ pub(super) fn host_rdna() -> u32 {
     if let Some(bits) = TEST_RDNA.get() {
         return bits;
     }
-    if HOST_RDNA.load(std::sync::atomic::Ordering::Relaxed) { super::rdna_float() } else { 0 }
+    if HOST_RDNA.load(std::sync::atomic::Ordering::Relaxed) { super::rdna_float() } else { other_host_float() }
+}
+
+/// On other hosts (NVIDIA): `VICTORY_FAST_FLOAT=<bits of super::rdna>`
+/// (decimal or `0x` hex; off by default) writes those console float
+/// instructions as the one host operation too, as on RDNA. Lead 2 of
+/// avatarmanz/VIctory-7900XTX#143 (RTX 4080): NVIDIA otherwise gets 21 DXIL
+/// instructions for every `v_med3_f32`, 10 extra for every `v_max_f32` /
+/// `v_min_f32` (only for -0 below +0) and 6 for every `v_mul_legacy_f32`.
+/// [`super::rdna::MED3`] (4) of a value between ordered constants is exact on
+/// any IEEE host; MAX_MIN (1) and LEGACY (2) can give a zero the other sign.
+/// Part of the translation through [`host_settings`].
+fn other_host_float() -> u32 {
+    static BITS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *BITS.get_or_init(|| {
+        std::env::var("VICTORY_FAST_FLOAT")
+            .ok()
+            .and_then(|v| {
+                let v = v.trim().to_owned();
+                match v.strip_prefix("0x") {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                    None => v.parse().ok(),
+                }
+            })
+            .map_or(0, |n| n & super::rdna::ALL)
+    })
 }
 
 /// The refusal of a first half of an interpolation whose result is read
