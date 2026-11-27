@@ -205,12 +205,18 @@ pub fn fingerprint() -> String {
     if let Some(host) = crate::host::host() {
         h.update(&host.driver().to_le_bytes());
     }
+    // Pipelines with static samplers are other pipelines to the driver
+    // when their samplers have fixed places.
+    if super::library::sampler_order() {
+        h.update(b"static samplers in a fixed order");
+    }
     h.finalize().to_hex()[..16].to_owned()
 }
 
 /// The translations of earlier runs are in `dir` (the pipeline library is
 /// not used: what is made here is the driver's to keep).
 pub fn use_translations(dir: PathBuf) {
+    super::library::read_sampler_order_from(dir.with_file_name("pipelines"));
     crate::shader_cache::use_shader_cache(dir);
 }
 

@@ -651,7 +651,14 @@ impl HostPipeline {
         };
         // Not from the library if it has static samplers (their places in the
         // driver's table differ between runs: `library::with_static_samplers`).
-        let _samplers = super::library::with_static_samplers(!samplers.is_empty());
+        // With `VICTORY_SAMPLER_ORDER=1` they are, when their samplers all have
+        // their places from the start: the order is part of their names.
+        let sampler_tag = super::library::place_samplers(&samplers);
+        let _samplers = super::library::with_static_samplers(!samplers.is_empty() && sampler_tag.is_none());
+        let tagged = |state: &str| match &sampler_tag {
+            Some(tag) => format!("{state} {tag}"),
+            None => state.to_owned(),
+        };
         let code = |i: usize| {
             stages.get(i).and_then(|(s, _)| s.translated()).map_or(
                 D3D12_SHADER_BYTECODE::default(),
@@ -668,7 +675,7 @@ impl HostPipeline {
                 CS: code(0),
                 ..Default::default()
             };
-            let name = super::library::name("compute", &root_blob, &[&code_bytes(&code(0))], "");
+            let name = super::library::name("compute", &root_blob, &[&code_bytes(&code(0))], &tagged(""));
             let made = super::library::pipeline(
                 &name,
                 // SAFETY: the description points at live data.
@@ -761,7 +768,7 @@ impl HostPipeline {
         } else {
             false
         };
-        let state = g.describe();
+        let state = tagged(&g.describe());
         if mesh.is_some() {
             // "triangles": the stream names its topology since it did not
             // load from the library without one (see `mesh_pipeline`); a

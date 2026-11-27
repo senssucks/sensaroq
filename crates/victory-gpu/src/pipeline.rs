@@ -1006,3 +1006,9 @@ mod tests {
         }
     }
 }
+
+/// See [`library::order_samplers`].
+#[cfg(windows)]
+pub(crate) fn order_samplers(device: &windows::Win32::Graphics::Direct3D12::ID3D12Device) {
+    library::order_samplers(device);
+}

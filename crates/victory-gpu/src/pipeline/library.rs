@@ -1038,3 +1038,186 @@ mod tests {
         assert!(final_bytes.iter().all(|&b| b == final_bytes[0]));
     }
 }
+
+/// `VICTORY_SAMPLER_ORDER=1`: the static samplers of the title's pipelines
+/// are made in one fixed order before anything else, so that each has the
+/// same place in the driver's table in every process. Pipelines with static
+/// samplers then load from the library (and hit the driver's own cache on
+/// disk) like the others, instead of being compiled again every run (about
+/// 1,400 a run, 150 ms each, on an RTX 5060 Ti; see [`with_static_samplers`]
+/// for why they were not kept). The order is `static-samplers.bin` beside the
+/// library, only ever added to: a sampler first met in a run is added at
+/// its end, and its pipelines are not stored that run (other code may have
+/// made samplers of its own before it); from the next run on it is made in
+/// the fixed order too.
+pub(crate) fn sampler_order() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SAMPLER_ORDER").is_some_and(|v| v == "1"))
+}
+
+const SAMPLER_FILE: &str = "static-samplers.bin";
+/// The driver's table holds 2,032 distinct static samplers (the next
+/// removes the device): the order stops well short of that.
+const SAMPLER_MAX: usize = 1024;
+/// A static sampler's state without its register, space and visibility.
+type SamplerKey = [u8; 44];
+
+struct SamplerTable {
+    index: std::collections::HashMap<SamplerKey, usize>,
+    /// Those made in the fixed order at the start.
+    first: usize,
+    /// Names the fixed order: part of the names of the pipelines that use it.
+    tag: String,
+    /// Where new ones are added (only a run of the title adds).
+    file: Option<PathBuf>,
+    /// Kept: a sampler whose last root signature goes may give its place up.
+    _keep: Vec<ID3D12RootSignature>,
+}
+
+static SAMPLERS: Mutex<Option<SamplerTable>> = Mutex::new(None);
+/// The folder of the order for a process without a library (`victory warm`).
+static SAMPLER_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Where `victory warm` reads the order from (it adds nothing).
+pub fn read_sampler_order_from(dir: PathBuf) {
+    let _ = SAMPLER_DIR.set(dir);
+}
+
+fn sampler_key(s: &D3D12_STATIC_SAMPLER_DESC) -> SamplerKey {
+    let words = [
+        s.Filter.0 as u32,
+        s.AddressU.0 as u32,
+        s.AddressV.0 as u32,
+        s.AddressW.0 as u32,
+        s.MipLODBias.to_bits(),
+        s.MaxAnisotropy,
+        s.ComparisonFunc.0 as u32,
+        s.BorderColor.0 as u32,
+        s.MinLOD.to_bits(),
+        s.MaxLOD.to_bits(),
+        0,
+    ];
+    let mut key = [0; 44];
+    for (at, w) in words.iter().enumerate() {
+        key[4 * at..4 * at + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    key
+}
+
+fn sampler_of(key: &SamplerKey) -> D3D12_STATIC_SAMPLER_DESC {
+    let w = |at: usize| u32::from_le_bytes([key[4 * at], key[4 * at + 1], key[4 * at + 2], key[4 * at + 3]]);
+    D3D12_STATIC_SAMPLER_DESC {
+        Filter: D3D12_FILTER(w(0) as i32),
+        AddressU: D3D12_TEXTURE_ADDRESS_MODE(w(1) as i32),
+        AddressV: D3D12_TEXTURE_ADDRESS_MODE(w(2) as i32),
+        AddressW: D3D12_TEXTURE_ADDRESS_MODE(w(3) as i32),
+        MipLODBias: f32::from_bits(w(4)),
+        MaxAnisotropy: w(5),
+        ComparisonFunc: D3D12_COMPARISON_FUNC(w(6) as i32),
+        BorderColor: D3D12_STATIC_BORDER_COLOR(w(7) as i32),
+        MinLOD: f32::from_bits(w(8)),
+        MaxLOD: f32::from_bits(w(9)),
+        ShaderRegister: 0,
+        RegisterSpace: 0,
+        ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+    }
+}
+
+/// A root signature holding the one static sampler `key`.
+fn make_sampler(device: &ID3D12Device, key: &SamplerKey) -> Option<ID3D12RootSignature> {
+    let sampler = sampler_of(key);
+    let desc = D3D12_VERSIONED_ROOT_SIGNATURE_DESC {
+        Version: D3D_ROOT_SIGNATURE_VERSION_1_1,
+        Anonymous: D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0 {
+            Desc_1_1: D3D12_ROOT_SIGNATURE_DESC1 {
+                NumParameters: 0,
+                pParameters: std::ptr::null(),
+                NumStaticSamplers: 1,
+                pStaticSamplers: &raw const sampler,
+                Flags: D3D12_ROOT_SIGNATURE_FLAG_NONE,
+            },
+        },
+    };
+    // SAFETY: the description points at a live sampler; the blob is read
+    // whole before it goes.
+    unsafe {
+        let mut blob: Option<windows::Win32::Graphics::Direct3D::ID3DBlob> = None;
+        D3D12SerializeVersionedRootSignature(&desc, &mut blob, None).ok()?;
+        let blob = blob?;
+        let bytes = std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize());
+        device.CreateRootSignature(0, bytes).ok()
+    }
+}
+
+/// Makes the static samplers of the fixed order, in it: called once, as
+/// soon as the host device is made and before anything else is made with it.
+pub(crate) fn order_samplers(device: &ID3D12Device) {
+    if !sampler_order() {
+        return;
+    }
+    let mut table = SAMPLERS.lock().unwrap_or_else(|e| e.into_inner());
+    if table.is_some() {
+        return;
+    }
+    let (dir, adds) = match (folder(), SAMPLER_DIR.get()) {
+        (Some(dir), _) => (Some(dir), true),
+        (None, Some(dir)) => (Some(dir.clone()), false),
+        (None, None) => (None, false),
+    };
+    let path = dir.map(|d| d.join(SAMPLER_FILE));
+    let bytes = path.as_ref().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
+    let mut index = std::collections::HashMap::new();
+    let mut keep = Vec::new();
+    for chunk in bytes.chunks_exact(44).take(SAMPLER_MAX) {
+        let mut key = [0; 44];
+        key.copy_from_slice(chunk);
+        if index.contains_key(&key) {
+            continue;
+        }
+        let Some(root) = make_sampler(device, &key) else { break };
+        keep.push(root);
+        index.insert(key, index.len());
+    }
+    let first = index.len();
+    let tag = format!("samplers {first} {}", &blake3::hash(&bytes[..first * 44]).to_hex()[..16]);
+    if path.is_none() {
+        tracing::warn!("VICTORY_SAMPLER_ORDER=1 without a pipeline folder yet: pipelines with static samplers are made every run");
+    }
+    tracing::info!(samplers = first, adds, "static samplers made in the fixed order (VICTORY_SAMPLER_ORDER)");
+    *table = Some(SamplerTable { index, first, tag, file: path.filter(|_| adds), _keep: keep });
+}
+
+/// For a pipeline with static `samplers`: a name for the fixed order they
+/// all have a place in from the start (the pipeline may then be kept in the
+/// library under a name with it), or `None` (made, not kept). Samplers not
+/// yet in the order are added to it for the next run.
+pub(crate) fn place_samplers(samplers: &[D3D12_STATIC_SAMPLER_DESC]) -> Option<String> {
+    if !sampler_order() || samplers.is_empty() {
+        return None;
+    }
+    let mut table = SAMPLERS.lock().unwrap_or_else(|e| e.into_inner());
+    let table = table.as_mut()?;
+    let mut fixed = true;
+    let mut new = Vec::new();
+    for s in samplers {
+        let key = sampler_key(s);
+        match table.index.get(&key) {
+            Some(&at) => fixed &= at < table.first,
+            None => {
+                fixed = false;
+                if table.file.is_some() && table.index.len() < SAMPLER_MAX {
+                    table.index.insert(key, table.index.len());
+                    new.extend_from_slice(&key);
+                }
+            }
+        }
+    }
+    if let (false, Some(file)) = (new.is_empty(), &table.file) {
+        use std::io::Write;
+        let written = std::fs::OpenOptions::new().create(true).append(true).open(file).and_then(|mut f| f.write_all(&new));
+        if let Err(e) = written {
+            tracing::warn!(error = %e, "static sampler order not written");
+        }
+    }
+    fixed.then(|| table.tag.clone())
+}
