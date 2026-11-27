@@ -112,6 +112,11 @@ $settings = @{
     # A frame may move game time up to 125 ms, not the title's 67: down to 8 fps the game keeps real time and its
     # sound stays in step (step_clamp.rs). Higher is kinder to slower PCs; 0 leaves the title's own.
     VICTORY_MAX_STEP_MS = '125'
+    # Copies of title buffers and windows the card reads, in its own memory up to 4 GB and 3 GB (defaults 2 GB and
+    # 1 GB on a 16 GB card). Above those they stay in the PC's memory and every shader read of them crosses the bus:
+    # on a PCIe 3.0 x8 link (RTX 5060 Ti on a Ryzen 5700G) the card showed 97% busy at 57 C while the copies made
+    # held 2,174 MB, the limit (session 1). The textures' share of the card is smaller by as much.
+    VICTORY_CARD_BUFFERS_MB = '4096'; VICTORY_CARD_WINDOWS_MB = '3072'
 }
 if (-not $SeriesS) {
     if ($Res -eq '1440') { $settings.VICTORY_NATIVE_1440P = '1' }
