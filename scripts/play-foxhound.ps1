@@ -58,8 +58,9 @@ if ($menu.Contains('VICTORY_MENU_FRAMEGEN')) {
 }
 if ($menu['VICTORY_MENU_FPS'] -match '^\d+$' -and [int]$menu['VICTORY_MENU_FPS'] -ge 1 -and [int]$menu['VICTORY_MENU_FPS'] -le 1000) { $fpsWanted = [int]$menu['VICTORY_MENU_FPS'] }
 $settings = @{
-    # Submission and copy machinery
-    VICTORY_THIN = '1'; VICTORY_JOIN_PARTS = '8'; VICTORY_RELAY = '2'; VICTORY_RELAY_COPY = '1'; VICTORY_WIDE_BACK = '1'
+    # Submission and copy machinery. VICTORY_THIN off: deferred list recording washes the 3D scene out on
+    # RTX 5060 Ti / 5070 Ti (avatarmanz/VIctory-7900XTX#112, #62); frame generation uses VICTORY_ASYNC_SUBMIT instead.
+    VICTORY_THIN = '0'; VICTORY_JOIN_PARTS = '8'; VICTORY_RELAY = '2'; VICTORY_RELAY_COPY = '1'; VICTORY_WIDE_BACK = '1'
     VICTORY_CARD_REHASH_RUNS = '1'; VICTORY_JOIN_COPIES = '1'; VICTORY_CARD_STEPS = '2'; VICTORY_CARD_AWAKE = '1'
     VICTORY_CARD_BUFFERS_MIN_KB = '64'; VICTORY_INDIRECT_WINDOW = '1'; VICTORY_INDIRECT_BATCH = '2'
     VICTORY_UPLOAD_AHEAD = '1'; VICTORY_SHOW_AFTER = '1'; VICTORY_MAP_THREADS = '1'
@@ -95,6 +96,8 @@ if ($Dlss -ne 'off') {
         $settings.VICTORY_DLSS = '1'; $settings.VICTORY_DLSS_MODE = $Dlss; $settings.VICTORY_STREAMLINE_DIR = $sl
         if ($FrameGen) { $settings.VICTORY_FRAMEGEN = '1'; $settings.VICTORY_FRAMEGEN_X = [string]$timesWanted }
         elseif (-not $NoFrameGenReady) { $settings.VICTORY_FRAMEGEN = '1'; $settings.VICTORY_FRAMEGEN_X = '0' }   # ready, off
+        # Frame generation needs the line of submissions: VICTORY_THIN=1 or VICTORY_ASYNC_SUBMIT=1 (streamline.rs).
+        if ($settings.VICTORY_FRAMEGEN -eq '1' -and $settings.VICTORY_THIN -ne '1') { $settings.VICTORY_ASYNC_SUBMIT = '1' }
         # Frame generation takes 1.5 to 2 GB of the card's memory, which the layer otherwise fills with textures up
         # to nine tenths of its budget (on a 12 GB card it then ran out: no generated frames). On from the start, it
         # is left a fifth of the budget; ready but off, a little less is held back.

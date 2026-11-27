@@ -21,7 +21,9 @@ $settings = @{
 if ($Safe) {
     $settings.VICTORY_UNDER_WIDE = '0'; $settings.VICTORY_LAND_ECHO = '0'
 } else {
-    $settings.VICTORY_THIN = '1'; $settings.VICTORY_JOIN_PARTS = '8'; $settings.VICTORY_UPLOAD_AHEAD = '1'
+    # VICTORY_THIN stays off: deferred list recording washes the 3D scene out on RTX 5060 Ti / 5070 Ti
+    # (avatarmanz/VIctory-7900XTX#112, #62; rorodev6/victory-nvidia-megafork 79f36b3). -More @{VICTORY_THIN='1'} to compare.
+    $settings.VICTORY_JOIN_PARTS = '8'; $settings.VICTORY_UPLOAD_AHEAD = '1'
 }
 if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
