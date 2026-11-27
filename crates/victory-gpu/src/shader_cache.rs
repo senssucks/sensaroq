@@ -132,11 +132,40 @@ pub fn precompile(container: &[u8]) -> Result<bool, String> {
 /// The translation of a console shader container, from the cache when
 /// there is one.
 pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
+    if local_first(container) {
+        let translate = |c: &[u8]| victory_shader::emit::with_local_first(|| victory_shader::emit::translate(c)).map_err(|e| e.to_string());
+        // A build of its own for these, so that no other translation is
+        // looked for again.
+        let build = *blake3::Hasher::new().update(&build()).update(b"VICTORY_WAVE_LOCAL_FIRST").finalize().as_bytes();
+        return match CACHE.get() {
+            Some(cache) => cached(cache, &build, container, translate),
+            None => translate(container),
+        };
+    }
     let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
     match CACHE.get() {
         Some(cache) => cached(cache, &build(), container, translate),
         None => translate(container),
     }
+}
+
+/// Whether `container` is a shader `VICTORY_WAVE_LOCAL_FIRST` names (16 hex
+/// digits of its hash, as `VICTORY_LEAVE_OUT` takes them; off by default):
+/// translated with each host wave as a wave of its own where that is exact
+/// (`victory_shader::emit::with_local_first`). For the decal heap's defrag
+/// (02384a60fda6f2d0): the faces need it, and with the halves meeting by
+/// spinning it took about 12 ms of the card a frame.
+pub(crate) fn local_first(container: &[u8]) -> bool {
+    static HASHES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let hashes = HASHES.get_or_init(|| {
+        std::env::var("VICTORY_WAVE_LOCAL_FIRST")
+            .unwrap_or_default()
+            .split(',')
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+            .collect()
+    });
+    !hashes.is_empty() && hashes.contains(&blake3::hash(container).to_hex()[..16].to_owned())
 }
 
 /// The cache entry's converter: the build and the container in, the

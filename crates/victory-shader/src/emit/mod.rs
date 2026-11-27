@@ -326,6 +326,24 @@ thread_local! {
     static OPT_OVERRIDE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
 }
 
+thread_local! {
+    /// See [`with_local_first`].
+    static LOCAL_FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with a console wave64 compute program on a 32-lane host
+/// translated with each host wave as a wave of its own first
+/// (`lower::with_local_waves`), where its wave operations are the
+/// allocation idiom: no spinning meetings of the two halves. For programs
+/// named by the caller (`VICTORY_WAVE_LOCAL_FIRST`, the decal heap's
+/// defrag, 11.85 ms of the card a frame with the meetings).
+pub fn with_local_first<T>(f: impl FnOnce() -> T) -> T {
+    let before = LOCAL_FIRST.replace(true);
+    let out = f();
+    LOCAL_FIRST.set(before);
+    out
+}
+
 /// Runs `f` with [`shader_opt`] answering `passes` on this thread: for a
 /// translation made once more with other passes, when the host's driver
 /// refused the first one (a translation made so is not the cache's).
@@ -609,6 +627,22 @@ pub fn emit(
 ) -> Result<HostShader, ShaderError> {
     // (what an earlier program's lowering on this thread left behind)
     lower::take_needs();
+    // Asked for this program ([`with_local_first`]): each host wave as a
+    // wave of its own first, where its wave operations are the allocation
+    // idiom (exact there), instead of two host waves that meet by spinning.
+    if LOCAL_FIRST.get()
+        && native.stage == HwStage::Cs
+        && native.wave64
+        && lower::host_max_wave() == 32
+        && lower::wave_local(p, st).is_ok()
+    {
+        if let Ok((shader, wave)) = lower::with_local_waves(|| emit_program(c, native, p, st, io, res))
+            && wave != Some(64)
+        {
+            return Ok(shader);
+        }
+        lower::take_needs();
+    }
     let original = emit_program(c, native, p, st, io, res);
     // A console wave64 compute program on a host of 32-lane waves that
     // still needs 64 lanes, or whose cross-lane code sits where not every
