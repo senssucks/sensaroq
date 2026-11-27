@@ -105,6 +105,9 @@ pub(crate) struct Shadow {
     /// and the bytes from the buffer's first byte to `start` (the heap
     /// begins on a 64 KiB line; a title buffer need not).
     place: Option<(windows::Win32::Graphics::Direct3D12::ID3D12Heap, u64)>,
+    /// For a window: whether shaders have been declared to write it and
+    /// never have (`VICTORY_QUIET_WINDOWS`, `crate::quiet`).
+    quiet: crate::quiet::Quiet,
 }
 
 /// What a copy in the card's memory ([`cards`]) has beside the buffer
@@ -3201,6 +3204,41 @@ impl Shadow {
             wc: AtomicU8::new(0),
             mapped: false,
             place: None,
+            quiet: crate::quiet::Quiet::new(),
+        }
+    }
+
+    /// Whether this is a window of the kind `crate::quiet` learns about: a
+    /// copy in the PC's memory, not in the card's, not card memory mapped,
+    /// not in place.
+    fn quiet_kind(&self) -> bool {
+        self.window && self.card.is_none() && !self.mapped && self.place.is_none()
+    }
+
+    /// [`Shadow::gpu_writes`] for what a draw or a dispatch may store
+    /// through a root view or a buffer view of the copy: not made at all for
+    /// a window that has been compared many times with nothing written
+    /// (`VICTORY_QUIET_WINDOWS=1`, `crate::quiet`).
+    pub(crate) fn gpu_writes_viewed(self: &Arc<Self>, list: &HostList, address: u64, len: u64) {
+        if self.quiet_kind() {
+            let rules = crate::quiet::rules();
+            if rules.mode != crate::quiet::Mode::Off {
+                let from = address as usize;
+                let to = from.saturating_add(len.min(self.left(address)) as usize);
+                if self.quiet.declared(&rules, from, to) == crate::quiet::Verdict::Hold {
+                    return;
+                }
+            }
+        }
+        self.gpu_writes(list, address, len);
+    }
+
+    /// `VICTORY_QUIET_WINDOWS`: the declared range `[from, to)` (title
+    /// addresses) was compared after a flight, and `written` bytes of it went
+    /// back to title memory.
+    pub(crate) fn quiet_compared(&self, from: usize, to: usize, written: usize) {
+        if self.quiet_kind() {
+            self.quiet.compared(&crate::quiet::rules(), from, to, written);
         }
     }
 

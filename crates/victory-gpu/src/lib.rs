@@ -67,6 +67,8 @@ mod popwatch;
 mod primitive;
 pub mod query;
 pub mod queue;
+#[cfg(windows)]
+mod quiet;
 #[cfg(all(windows, feature = "diagnostics"))]
 pub mod replay;
 #[cfg(windows)]
