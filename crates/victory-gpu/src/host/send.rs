@@ -198,9 +198,32 @@ pub(super) fn take(host: &Host, dirty: &[(std::sync::Arc<Shadow>, Vec<(usize, us
     // A copy without its CPU side (`crate::shadow::sideless`) sends out of
     // title memory, by copies alone (a word read there could fault).
     let sideless: Vec<bool> = dirty.iter().map(|(shadow, _)| shadow.card_data().is_null()).collect();
+    // Their ranges joined across gaps of less than `GAP`: 62,000-70,000
+    // ranges a frame went up one copy command each in session 27 (11,000
+    // without the switch, most of them words). What lies between is title
+    // memory too, which the card's side holds or is to hold: no shader
+    // writes such a copy.
+    const GAP: usize = 64 << 10;
+    let joined: Vec<Vec<(usize, usize)>> = dirty
+        .iter()
+        .zip(&sideless)
+        .map(|((_, ranges), &title)| {
+            let mut out: Vec<(usize, usize)> = Vec::new();
+            if title {
+                for &(a, b) in ranges.iter() {
+                    match out.last_mut() {
+                        Some(last) if a <= last.1 + GAP => last.1 = last.1.max(b),
+                        _ => out.push((a, b)),
+                    }
+                }
+            }
+            out
+        })
+        .collect();
     let mut at = 0u64;
     let mut copies = Vec::with_capacity(dirty.len());
-    for ((_, ranges), &title) in dirty.iter().zip(&sideless) {
+    for (((_, ranges), &title), joined) in dirty.iter().zip(&sideless).zip(&joined) {
+        let ranges: &[(usize, usize)] = if title { joined } else { ranges };
         let short = |&(a, b): &(usize, usize)| !title && short(a, b - a);
         let mut runs = Vec::new();
         for &(a, b) in ranges.iter().filter(|r| !short(r)) {
