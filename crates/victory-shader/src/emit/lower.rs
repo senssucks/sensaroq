@@ -4202,7 +4202,16 @@ impl<'a> Lower<'a> {
         let limit = self.s.m.f32(threshold.to_bits());
         let k = self.s.m.f32(below_one.to_bits());
         let over = self.s.m.cmp(c, pred::OGE, r, limit);
-        self.s.m.select(c, over, k, r)
+        let r = self.s.m.select(c, over, k, r);
+        // The console's fraction of an infinity (or of NaN) is NaN; NVIDIA's
+        // Frc of an infinity is not (the idea of XCL pull request #68,
+        // written anew here: XCL's code is GPL-2.0-only). |a| >= inf,
+        // unordered: true for NaN too.
+        let size = self.unary(6, a);
+        let inf = self.s.m.f32(0x7f80_0000);
+        let bad = self.s.m.cmp(c, pred::UGE, size, inf);
+        let nan = self.s.m.f32(0x7fc0_0000);
+        self.s.m.select(c, bad, nan, r)
     }
 
     /// Sine, or cosine, of an angle in turns, as the hardware takes it. The
