@@ -570,15 +570,27 @@ pub(crate) fn name(kind: &str, root: &[u8], code: &[&[u8]], state: &str) -> Stri
 
 /// The pipeline named `name`: loaded from the library by `load` if it is
 /// there with the same description, else made by `create` and stored.
+///
+/// `create` is given the driver's own compiled form of it when there is one
+/// (`victory warm`'s own process, [`store_from`]), else nothing.
 pub(crate) fn pipeline(
     name: &str,
     load: impl FnOnce(&ID3D12PipelineLibrary1, PCWSTR) -> windows::core::Result<ID3D12PipelineState>,
-    create: impl FnOnce() -> windows::core::Result<ID3D12PipelineState>,
+    create: impl FnOnce(&[u8]) -> windows::core::Result<ID3D12PipelineState>,
 ) -> windows::core::Result<ID3D12PipelineState> {
     let wide = HSTRING::from(name);
+    // In the warm's own process only those its processes made are made,
+    // from what they made (nothing is compiled there).
+    let cached: &[u8] = match FROM_BLOBS.get() {
+        Some(blobs) => match blobs.get(name) {
+            Some(blob) => blob,
+            None => return Err(windows::Win32::Foundation::E_ABORT.into()),
+        },
+        None => &[],
+    };
     let Some(library) = library().filter(|_| !STATIC_SAMPLERS.get()) else {
         MADE.fetch_add(1, Ordering::Relaxed);
-        return create();
+        return create(cached);
     };
     let began = std::time::Instant::now();
     let loaded = {
@@ -604,9 +616,10 @@ pub(crate) fn pipeline(
     // Compiled outside any lock: compiles take up to seconds.
     let pso = {
         let _call = call("make", name);
-        create()?
+        create(cached)?
     };
     MADE.fetch_add(1, Ordering::Relaxed);
+    capture(name, &pso);
     crate::host::trail(|| {
         let label = LABEL.with(|l| l.borrow().clone());
         format!(
@@ -1225,4 +1238,50 @@ pub(crate) fn place_samplers(samplers: &[D3D12_STATIC_SAMPLER_DESC]) -> Option<S
         }
     }
     fixed.then(|| table.tag.clone())
+}
+
+/// In a process of `victory warm`: each pipeline it makes (that the library
+/// would keep) is written here, by name, with the driver's compiled form.
+static CAPTURE: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
+/// In `victory warm`'s own process: those forms by name ([`pipeline`]).
+static FROM_BLOBS: OnceLock<std::collections::HashMap<String, Vec<u8>>> = OnceLock::new();
+
+/// See [`CAPTURE`].
+pub(crate) fn capture_to(file: std::fs::File) {
+    let _ = CAPTURE.set(Mutex::new(file));
+}
+
+/// See [`FROM_BLOBS`].
+pub(crate) fn store_from(blobs: std::collections::HashMap<String, Vec<u8>>) {
+    let _ = FROM_BLOBS.set(blobs);
+}
+
+/// Writes `pso`'s compiled form under `name` ([`CAPTURE`]):
+/// `<name length u16><name><form length u32><form>`.
+fn capture(name: &str, pso: &ID3D12PipelineState) {
+    let Some(file) = CAPTURE.get() else { return };
+    // SAFETY: a live pipeline; the blob is read whole before it goes.
+    let Ok(blob) = (unsafe { pso.GetCachedBlob() }) else { return };
+    let bytes = unsafe { std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize()) };
+    let mut record = Vec::with_capacity(6 + name.len() + bytes.len());
+    record.extend((name.len() as u16).to_le_bytes());
+    record.extend(name.as_bytes());
+    record.extend((bytes.len() as u32).to_le_bytes());
+    record.extend(bytes);
+    use std::io::Write;
+    let _ = file.lock().unwrap_or_else(|e| e.into_inner()).write_all(&record);
+}
+
+/// The records [`capture`] wrote in `bytes`.
+pub(crate) fn captured(bytes: &[u8], into: &mut std::collections::HashMap<String, Vec<u8>>) {
+    let mut at = 0;
+    while let Some(head) = bytes.get(at..at + 2) {
+        let n = usize::from(u16::from_le_bytes([head[0], head[1]]));
+        let Some(name) = bytes.get(at + 2..at + 2 + n) else { break };
+        let Some(len) = bytes.get(at + 2 + n..at + 6 + n) else { break };
+        let len = u32::from_le_bytes([len[0], len[1], len[2], len[3]]) as usize;
+        let Some(blob) = bytes.get(at + 6 + n..at + 6 + n + len) else { break };
+        into.insert(String::from_utf8_lossy(name).into_owned(), blob.to_vec());
+        at += 6 + n + len;
+    }
 }

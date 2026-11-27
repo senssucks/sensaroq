@@ -34,6 +34,9 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     let began = Instant::now();
     let until = minutes.map(|m| began + Duration::from_secs_f64(m.max(0.0) * 60.0));
     victory_hle::known_pipelines::use_translations(dir.with_file_name("shaders"));
+    // What the processes make is put in the runs' pipeline library at the
+    // end (`known::store`): before the host is made, which reads it.
+    known::use_library(&dir);
     let fingerprint = known::fingerprint();
     let done_file = dir.join("warm-done.txt");
     let bad_file = dir.join("warm-bad.txt");
@@ -101,6 +104,7 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
     let chunks: Vec<&[usize]> = all.chunks(AT_ONCE).collect();
     let next = AtomicUsize::new(0);
     let state = Mutex::new((Vec::<f64>::new(), 0usize, 0usize));
+    let made_ok = Mutex::new(Vec::<usize>::new());
     let done_out = Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(&done_file)?);
     // (Read back by the runs: these are made beside the others, not before.)
     let slow_out = Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open(dir.join("slow-pipelines.txt"))?);
@@ -116,6 +120,9 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
                         let (made, ended) = child(rest, |n, ms, there| {
                             if ms >= SLOW_MS {
                                 let _ = writeln!(lock(&slow_out), "\n{} {ms:.0}", keys[n]);
+                            }
+                            if there {
+                                lock(&made_ok).push(n);
                             }
                             let mut state = lock(&state);
                             state.0.push(ms);
@@ -142,6 +149,15 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         }
     });
     println!();
+    let mut made_ok = made_ok.into_inner().unwrap_or_else(|e| e.into_inner());
+    if !made_ok.is_empty() {
+        made_ok.sort_unstable();
+        print!("putting {} into the game's pipeline library ...", made_ok.len());
+        let _ = std::io::stdout().flush();
+        let putting = Instant::now();
+        let (stored, not) = known::store(&dir, &made_ok);
+        println!(" {stored} in ({not} not) in {}", min_sec(putting.elapsed().as_secs_f64()));
+    }
     if until.is_some_and(|t| Instant::now() >= t) {
         println!("time is up: the rest are made while the game runs (and by the next warm)");
     }
@@ -259,6 +275,8 @@ fn make(dir: &Path, these: &str) -> Result<()> {
     let these: Vec<usize> = these.split(',').map(|n| n.parse().context("--these")).collect::<Result<_>>()?;
     let cfg = victory_core::Config::load()?;
     victory_hle::known_pipelines::use_translations(cfg.cache_subdir("shaders")?);
+    // For the warm's own process to put in the runs' library.
+    known::capture_into(dir);
     let mut out = std::io::stdout();
     known::make(dir, &these, |n, came| {
         let told = match came {

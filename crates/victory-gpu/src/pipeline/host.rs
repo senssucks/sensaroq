@@ -461,6 +461,14 @@ fn refuse(reason: &'static str, shaders: &[Arc<Shader>]) -> Option<HostPipeline>
     None
 }
 
+/// A description's compiled form (none when empty).
+fn cached_pso(cached: &[u8]) -> D3D12_CACHED_PIPELINE_STATE {
+    D3D12_CACHED_PIPELINE_STATE {
+        pCachedBlob: if cached.is_empty() { std::ptr::null() } else { cached.as_ptr().cast() },
+        CachedBlobSizeInBytes: cached.len(),
+    }
+}
+
 impl HostPipeline {
     /// A host pipeline for vertex and pixel shaders with the graphics
     /// state `g`, or for one compute shader.
@@ -680,8 +688,13 @@ impl HostPipeline {
                 &name,
                 // SAFETY: the description points at live data.
                 |library, name| unsafe { library.LoadComputePipeline(name, &desc) },
-                // SAFETY: as above.
-                || unsafe { host.device.CreateComputePipelineState(&desc) },
+                // SAFETY: as above; the compiled form outlives the call.
+                |cached| unsafe {
+                    // (A bitwise copy: its root signature is borrowed, not owned.)
+                    let mut desc = std::ptr::read(&desc);
+                    desc.CachedPSO = cached_pso(cached);
+                    host.device.CreateComputePipelineState(&desc)
+                },
             );
             let pso = match made {
                 Ok(pso) => pso,
@@ -873,8 +886,13 @@ impl HostPipeline {
                 name,
                 // SAFETY: the description points at live data.
                 |library, name| unsafe { library.LoadGraphicsPipeline(name, desc) },
-                // SAFETY: as above.
-                || unsafe { host.device.CreateGraphicsPipelineState(desc) },
+                // SAFETY: as above; the compiled form outlives the call.
+                |cached| unsafe {
+                    // (A bitwise copy: its root signature is borrowed, not owned.)
+                    let mut desc = std::ptr::read(desc);
+                    desc.CachedPSO = cached_pso(cached);
+                    host.device.CreateGraphicsPipelineState(&desc)
+                },
             )
         };
         let mut made = make(&desc, &name(rect_gs.as_ref()));
@@ -967,8 +985,14 @@ fn stream_pipeline<S>(
         name,
         // SAFETY: the stream holds whole subobjects pointing at live data.
         |library, name| unsafe { library.LoadPipeline(name, &desc) },
-        // SAFETY: as above.
-        || unsafe { device.CreatePipelineState(&desc) },
+        // SAFETY: as above. (No compiled form is passed to a stream: one
+        // given is not used, and the pipeline is not made.)
+        |cached| {
+            if !cached.is_empty() {
+                return Err(windows::Win32::Foundation::E_NOTIMPL.into());
+            }
+            unsafe { device.CreatePipelineState(&desc) }
+        },
     )
 }
 

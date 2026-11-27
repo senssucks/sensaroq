@@ -223,6 +223,61 @@ pub fn use_translations(dir: PathBuf) {
     crate::shader_cache::use_shader_cache(dir);
 }
 
+/// `victory warm`'s own process keeps the run's pipeline library in `dir`
+/// (called before anything asks for the host).
+pub fn use_library(dir: &Path) {
+    super::library::use_pipeline_cache(dir.to_path_buf());
+}
+
+/// A process of `victory warm` writes what it makes for its own process to
+/// keep ([`store`]): NVIDIA's cache on disk is not used again by another
+/// process (a warm made again took 130-150 ms a pipeline, as the first).
+pub fn capture_into(dir: &Path) {
+    let folder = dir.join(BLOBS);
+    if std::fs::create_dir_all(&folder).is_err() {
+        return;
+    }
+    if let Ok(file) = std::fs::File::create(folder.join(format!("{}.bin", std::process::id()))) {
+        super::library::capture_to(file);
+    }
+}
+
+const BLOBS: &str = "warm-made";
+
+/// In `victory warm`'s own process ([`use_library`]): the pipelines of
+/// `which` its processes made are put in the run's pipeline library from
+/// their compiled forms (nothing compiled here) and the library is saved, so
+/// that a run loads them. How many were put in, and how many were not.
+pub fn store(dir: &Path, which: &[usize]) -> (usize, usize) {
+    let folder = dir.join(BLOBS);
+    let mut blobs = HashMap::new();
+    let files: Vec<PathBuf> = std::fs::read_dir(&folder)
+        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    for file in &files {
+        if let Ok(bytes) = std::fs::read(file) {
+            super::library::captured(&bytes, &mut blobs);
+        }
+    }
+    if blobs.is_empty() {
+        return (0, 0);
+    }
+    super::library::store_from(blobs);
+    let mut stored = 0;
+    let mut not = 0;
+    make(dir, which, |_, came| match came {
+        Some((_, true)) => stored += 1,
+        Some((_, false)) => not += 1,
+        None => {}
+    });
+    // (Those the library had already count as put in.)
+    super::library::save(true);
+    for file in files {
+        let _ = std::fs::remove_file(file);
+    }
+    (stored, not)
+}
+
 /// Makes the host pipelines of those of `which` (numbers in the file) and
 /// lets each go again: the driver's cache on disk keeps them. `each` is told
 /// the number before, and what came of it after: milliseconds and whether
