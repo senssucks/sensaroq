@@ -911,6 +911,24 @@ pub(crate) static HEAP_TEXTURES_FULL: AtomicU64 = AtomicU64::new(0);
 /// memory is looked at again, each counted from the look before.
 const RECHECK_FRAMES: [u64; 5] = [4, 12, 40, 120, 400];
 
+/// [`RECHECK_FRAMES`], or the frames `VICTORY_HEAP_RECHECK_FRAMES` lists
+/// (numbers between commas, each counted from the look before; at most
+/// 16). Sessions 22b-24 found 300 textures changed after their upload with
+/// nothing to tell of it, 13 to 172 frames after it: for that long the card
+/// showed what the memory held before (a garbled face, another texture's
+/// blocks). Looks sooner and more often find them sooner, for 48 KiB read
+/// a look.
+fn recheck_frames() -> &'static [u64] {
+    static FRAMES: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
+    FRAMES.get_or_init(|| {
+        let listed: Vec<u64> = std::env::var("VICTORY_HEAP_RECHECK_FRAMES")
+            .ok()
+            .map(|v| v.split(',').filter_map(|n| n.trim().parse().ok()).filter(|&n| n > 0).take(16).collect())
+            .unwrap_or_default();
+        if listed.is_empty() { RECHECK_FRAMES.to_vec() } else { listed }
+    })
+}
+
 /// Looks at uploaded textures picked by index that found the memory as it
 /// was, and that found it changed (uploaded again), since the start.
 pub(crate) static HEAP_TEXTURES_RECHECKED: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
@@ -3324,7 +3342,7 @@ impl State {
             // title paints all the time through another view of their pages
             // (all their blocks are shown at other addresses too), and each
             // was shown four frames late, over and over.
-            let mut again_in = RECHECK_FRAMES[0];
+            let mut again_in = recheck_frames()[0];
             // What the queue knew of it when the slots due were taken, while
             // its marks say it holds the write handed out still; else (or with
             // `VICTORY_QUEUE_BATCH=0`) asked now.
@@ -3337,7 +3355,7 @@ impl State {
                 if looked == print {
                     HEAP_TEXTURES_RECHECKED[0].fetch_add(1, Ordering::Relaxed);
                     outcome(slot_outcome::UNCHANGED);
-                    tells.tell(index, write, match RECHECK_FRAMES.get(usize::from(looks) + 1) {
+                    tells.tell(index, write, match recheck_frames().get(usize::from(looks) + 1) {
                         Some(wait) => Told::Recheck(frame + wait, (at, len), print, looks + 1, uploaded),
                         None => Told::Done(None),
                     });
