@@ -537,7 +537,12 @@ pub fn fspx_program(part: &[u8]) -> Result<NativeProgram, ShaderError> {
             RootType::Descriptor => 2,
             // The code holds its words; no user data.
             RootType::ImmediateSampler => 0,
-            _ => return Err(Malformed("an FSPX resource of an unknown root type")),
+            // Root constants: their dwords in user data, as in a root
+            // signature's (Series S compute and FidelityFX-style effects).
+            RootType::Constants => u32::from(u.dwords.max(1)),
+            // The 32-bit address of a heap (SM 6.6 dynamic resources).
+            RootType::ResourceHeap | RootType::SamplerHeap => 1,
+            RootType::Other(_) => return Err(Malformed("an FSPX resource of an unknown root type")),
         };
         if sgprs > 0 && !layout.iter().any(|p| p.slot == u.slot) {
             layout.push(RootParam {
