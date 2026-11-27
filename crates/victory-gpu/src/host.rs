@@ -597,6 +597,12 @@ fn bury_lag() -> u64 {
 /// Drops what waited for submissions up to `finished` ([`bury_lag`]). The
 /// numbers come in order within each thread's shard.
 fn bury(finished: u64) {
+    drop(unburied(finished));
+}
+
+/// What waited for submissions up to `finished` ([`bury_lag`]), taken out
+/// of [`RETIRED`].
+fn unburied(finished: u64) -> Vec<(u64, Retired)> {
     let finished = finished.saturating_sub(bury_lag());
     let mut done: Vec<(u64, Retired)> = Vec::new();
     for shard in &RETIRED {
@@ -606,17 +612,17 @@ fn bury(finished: u64) {
             done.extend(retired.drain(..n));
         }
     }
-    drop(done);
+    done
 }
 
 /// [`bury`] for the thread that lands flights (`Host::relay_land`), with
 /// `VICTORY_BURY_ASIDE=1` (off by default: [`bury`], as before): what is
-/// done with is taken out of [`RETIRED`] where it lies, the others staying
-/// in place (the partition in [`bury`] moves every one of them at each
-/// landing), and dropped on a thread of its own (`victory-bury`), not in
+/// done with is dropped on a thread of its own (`victory-bury`), not in
 /// the landing. Dropping later is always allowed: these objects only wait
-/// for the card. In the tree this comes from the partition was 0.9 ms a
-/// frame of the landing thread and releasing the objects 2 ms.
+/// for the card. (Here [`bury`] already takes only the front of each
+/// queue; in the tree this comes from, which moved every entry at each
+/// landing, that was 0.9 ms a frame of the landing thread and releasing
+/// the objects 2 ms.)
 fn bury_aside(finished: u64) {
     static ON: OnceLock<bool> = OnceLock::new();
     static TO: OnceLock<Option<Mutex<std::sync::mpsc::Sender<Vec<(u64, Retired)>>>>> = OnceLock::new();
@@ -624,19 +630,7 @@ fn bury_aside(finished: u64) {
         bury(finished);
         return;
     }
-    let done = {
-        let mut retired = RETIRED.lock().unwrap_or_else(|e| e.into_inner());
-        let mut done = Vec::new();
-        let mut i = 0;
-        while i < retired.len() {
-            if retired[i].0 <= finished {
-                done.push(retired.swap_remove(i));
-            } else {
-                i += 1;
-            }
-        }
-        done
-    };
+    let done = unburied(finished);
     if done.is_empty() {
         return;
     }
