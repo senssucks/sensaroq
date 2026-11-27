@@ -2002,6 +2002,17 @@ pub(crate) fn probe_view_limit() {
             RAW_TWINS
         } else if fits(UNCAPPED_VIEWS) {
             UNCAPPED_VIEWS
+        } else if crate::asked_for!("VICTORY_VIEW_PROBE_MAX") && fits(PORTABLE_VIEWS + 1) {
+            // The most the host takes between the two (`VICTORY_VIEW_PROBE_MAX=1`,
+            // off by default): the retail game's heap is 1,245,184 views, and
+            // on NVIDIA, which refuses 2^21, those past 1,000,000 read the null
+            // slot (session 32).
+            let (mut fit, mut over) = (PORTABLE_VIEWS + 1, UNCAPPED_VIEWS);
+            while over - fit > 1024 {
+                let mid = fit + (over - fit) / 2;
+                if fits(mid) { fit = mid } else { over = mid }
+            }
+            fit
         } else {
             PORTABLE_VIEWS
         };
