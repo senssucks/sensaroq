@@ -2215,14 +2215,14 @@ fn give_chunks(chunks: Vec<(Chunk, u64)>) {
 static UPLOAD_SPARE: [Mutex<Spare<Chunk>>; 2] = [const { Mutex::new(Spare::new()) }; 2];
 
 /// The most bytes [`UPLOAD_SPARE`] keeps of each kind
-/// (`VICTORY_UPLOAD_POOL_MB`, 1024; 0: no pool, a buffer per copy as
+/// (`VICTORY_UPLOAD_POOL_MB`, e.g. 1024; unset or 0, the default: no pool, a buffer per copy as
 /// before). Every copy a list recorded made a buffer of its own and waited
 /// for it to be resident: 19,324 shared buffers and 9.3 s of waits in a
 /// 5-minute session (RTX 4090).
 fn upload_pool_most() -> u64 {
     static MB: OnceLock<u64> = OnceLock::new();
     *MB.get_or_init(|| {
-        std::env::var("VICTORY_UPLOAD_POOL_MB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(1024)
+        std::env::var("VICTORY_UPLOAD_POOL_MB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
     }) << 20
 }
 
@@ -2275,7 +2275,10 @@ fn trim_spare_chunks() {
         // under 4 GiB while the title runs (RTX 4090: 12,925 chunks, 13.5 GB
         // and 7.7 s of waits in a 5-minute session).
         let mut freed = Vec::new();
-        while spare.bytes > SPARE_MOST && !spare.kept.is_empty() {
+        // Without the upload pool (`VICTORY_UPLOAD_POOL_MB` unset, the
+        // default) all of them go, as before.
+        let floor = if upload_pool_most() > 0 { SPARE_MOST } else { 0 };
+        while spare.bytes > floor && !spare.kept.is_empty() {
             let (chunk, size) = spare.kept.remove(0);
             spare.bytes -= size;
             freed.push((chunk, size));

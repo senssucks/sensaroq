@@ -638,6 +638,14 @@ pub(crate) fn pipeline(
     Ok(pso)
 }
 
+/// Whether library saves wait out bursts and memory pressure
+/// (`VICTORY_LIBRARY_SAVE_LATER=1`, trustno1-coder/VIctory-NVIDIA #81; off by
+/// default: every 20 s, as before).
+fn save_later() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_LIBRARY_SAVE_LATER").is_some_and(|v| v == "1"))
+}
+
 /// As [`save`], from a worker while more pipelines are still queued.
 ///
 /// Every save serialises the whole library (over a gigabyte once it is warm)
@@ -645,13 +653,17 @@ pub(crate) fn pipeline(
 /// pipelines (a new area, a cutscene) that is exactly when the title is
 /// waiting on them, and the write competes with texture streaming for the
 /// disk. Saves in a burst are kept to one every `VICTORY_LIBRARY_SAVE_BUSY_S`
-/// seconds (default 180; 20 as before); the save when the queue runs dry and
+/// seconds (180 with `VICTORY_LIBRARY_SAVE_LATER=1`; 20 by default, as
+/// before); the save when the queue runs dry and
 /// the one at exit are as they were.
 pub(crate) fn save_while_busy() {
+    if !save_later() {
+        return save(false);
+    }
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     static EVERY: OnceLock<std::time::Duration> = OnceLock::new();
     let every = *EVERY.get_or_init(|| {
-        let secs = std::env::var("VICTORY_LIBRARY_SAVE_BUSY_S").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(180);
+        let secs = std::env::var("VICTORY_LIBRARY_SAVE_BUSY_S").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(if save_later() { 180 } else { 20 });
         std::time::Duration::from_secs(secs)
     });
     {
@@ -672,7 +684,8 @@ pub(crate) fn save_while_busy() {
 /// Writes the library and the early list if pipelines were added since the
 /// last save and `SAVE_EVERY` has passed (or `now`).
 ///
-/// Under host memory pressure ([`crate::residency::pressured`]) the interval
+/// With `VICTORY_LIBRARY_SAVE_LATER=1`, under host memory pressure
+/// ([`crate::residency::pressured`]) the interval
 /// is `SAVE_EVERY_PRESSURED` instead: the serialised library (over a gigabyte
 /// once warm) is written through the PC's memory, and on a 32 GB PC that ran
 /// pressured for a whole session (log of 2026-11-27, commit headroom 3.4 GB)
@@ -686,7 +699,7 @@ pub(crate) fn save(now: bool) {
     let (Some(dir), Some(library)) = (DIR.get(), library()) else { return };
     {
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        let every = if crate::residency::pressured() { SAVE_EVERY_PRESSURED } else { SAVE_EVERY };
+        let every = if save_later() && crate::residency::pressured() { SAVE_EVERY_PRESSURED } else { SAVE_EVERY };
         if !now && last.is_some_and(|t| t.elapsed() < every) {
             return;
         }
