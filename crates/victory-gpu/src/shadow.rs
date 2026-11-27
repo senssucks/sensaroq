@@ -4067,6 +4067,7 @@ impl Shadow {
                 let guarded = crate::watch::guarded(from, to) || self.watched.load(Ordering::Relaxed) == GUARDED;
                 self.watched.store(if guarded { GUARDED } else { 1 }, Ordering::Relaxed);
                 let copied = self.copy_stale(from, to, now, &written);
+                REFRESH_BYTES[0].fetch_add(copied as u64, Ordering::Relaxed);
                 self.refresh_check(from, to);
                 #[cfg(feature = "diagnostics")]
                 {
@@ -4085,6 +4086,8 @@ impl Shadow {
         self.copy(from, to);
         #[cfg(feature = "diagnostics")]
         crate::copystat::whole(from, to - from, started.elapsed().as_micros() as u64);
+        REFRESH_BYTES[1].fetch_add((to - from) as u64, Ordering::Relaxed);
+        REFRESH_BYTES[2].fetch_add(1, Ordering::Relaxed);
         to - from
     }
 
@@ -6000,4 +6003,14 @@ pub(crate) fn near(va: u64) -> String {
         ));
     }
     text
+}
+
+/// Since the last [`take_refresh_bytes`]: bytes refreshes copied as the
+/// write watch or the guards said they changed, bytes copied whole (a copy
+/// not watched), and how many whole copies.
+static REFRESH_BYTES: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+/// See [`REFRESH_BYTES`].
+pub(crate) fn take_refresh_bytes() -> [u64; 3] {
+    [0, 1, 2].map(|i| REFRESH_BYTES[i].swap(0, Ordering::Relaxed))
 }

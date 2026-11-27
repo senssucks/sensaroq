@@ -8207,6 +8207,7 @@ fn submit_split_line(frames: f64) {
     let work = [0, 1].map(|i| REFRESH_WORK[i].swap(0, Ordering::Relaxed) as f64 / 1e6 / frames);
     let other = [0, 1, 2, 3].map(|i| OTHER_STEPS[i].swap(0, Ordering::Relaxed) as f64 / 1e6 / frames);
     let handled = crate::watch::take_handled();
+    let refreshed = crate::shadow::take_refresh_bytes();
     if all + after <= 0.0 {
         return;
     }
@@ -8222,7 +8223,8 @@ fn submit_split_line(frames: f64) {
          the refreshes' work, all threads: {:.1} asking whether a copy has anything new, {:.1} bringing copies up to date; \
          in the lists' steps besides: {:.1} steps of ours, {:.1} ranges shaders write (their copy's refresh first), {:.1} \
          textures, {:.1} preludes and gathering the lists; \
-         faults taken in memory we watch, all threads: {:.0} ({:.2} ms in the handler)",
+         faults taken in memory we watch, all threads: {:.0} ({:.2} ms in the handler); refreshes copied {:.1} MB as \
+         watched and {:.1} MB whole in {:.0} copies not watched",
         ms[0],
         ms[8],
         ms[1],
@@ -8254,6 +8256,9 @@ fn submit_split_line(frames: f64) {
         other[3],
         handled[0] as f64 / frames,
         handled[1] as f64 / 1e6 / frames,
+        refreshed[0] as f64 / 1e6 / frames,
+        refreshed[1] as f64 / 1e6 / frames,
+        refreshed[2] as f64 / frames,
     );
     let [first, again] = [0, 1].map(|i| HEAP_SYNC_FIRST[i].swap(0, Ordering::Relaxed) as f64 / frames);
     if first + again > 0.0 {
