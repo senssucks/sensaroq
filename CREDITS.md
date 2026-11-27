@@ -38,6 +38,8 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [PR #501](https://github.com/fxceless/victory-fork/pull/501) | No blending on integer render targets | Yorivel |
 | [PR #683](https://github.com/fxceless/victory-fork/pull/683) | A loop limit for compute programs alone | Danigamer05 |
 | [#1379](https://github.com/fxceless/victory-fork/issues/1379) | The pipeline skip list as a set | the reporter of that issue |
+| [PR #1044](https://github.com/fxceless/victory-fork/pull/1044) | DirectStorage workers per physical core (`VICTORY_DSTORAGE_PHYSICAL`, off by default here) | Key |
+| [PR #1224](https://github.com/fxceless/victory-fork/pull/1224) | Retired host objects dropped off the landing thread (`VICTORY_BURY_ASIDE`, off by default), from Steenax6/VIctory-NVID | Steenax6 |
 
 ### Peppacodes/playablegames-peppa
 
@@ -58,6 +60,9 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [PR #87](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/87) | The mapping lock in 2 MiB address stripes (`VICTORY_MAPPING_STRIPES`) | superboynick |
 | [PR #44](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/44) | Physical pages from sections of at most n MiB (`VICTORY_SECTION_MB`) | CLHelper |
 | [PR #81](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/81) | Library saves wait out bursts and memory pressure (`VICTORY_LIBRARY_SAVE_LATER`, off by default here) | harrisotiropoulos-jpg |
+| [PR #127](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/127) | A submission's one asking begun beside its first steps (`VICTORY_ASK_FIRST`, off by default) | 1mosce |
+| [PR #139](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/139) | Retired objects in sixteen queues (`VICTORY_RETIRED_SHARDS`, off by default here); the kept-thread count settable (`VICTORY_WIDE_THREADS`) | dcastell1 |
+| [PR #126](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/126) | Refreshes handed to the kept threads several at a time (`VICTORY_WIDE_CHUNK`) | 1mosce |
 
 ### xcl-dev/xcl (ideas only, re-written; XCL is GPL-2.0-only)
 
