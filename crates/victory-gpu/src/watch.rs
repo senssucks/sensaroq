@@ -128,12 +128,74 @@ struct Journal {
     /// Page ranges asked ahead for a submission's refreshes ([`ask_ahead`])
     /// and the asking that did: `writes` answers for a range inside one
     /// from the journal, without another kernel call.
-    ahead: Vec<(usize, usize)>,
+    ahead: Ahead,
     ahead_asked: u64,
     /// The ahead asking stands for a whole submission ([`ask_once`]): no
     /// other ahead asking is made, and `ahead` stays, until
     /// [`ask_once_end`].
     kept: bool,
+}
+
+/// Page ranges `[a, b)` asked ahead, by start, each as asked (none merged):
+/// whether one of them holds a range is asked at every refresh of a
+/// submission (thousands a frame) and at every range of [`ask_rest`], where
+/// a scan of all of them made the submission's asking quadratic in its
+/// ranges. `reach[i]` is the furthest end of `ranges[..=i]`, so "some range
+/// with `a <= first` ends at `last` or later", which is "one range holds
+/// `[first, last)`", is one binary search.
+struct Ahead {
+    ranges: Vec<(usize, usize)>,
+    reach: Vec<usize>,
+}
+
+impl Ahead {
+    const fn new() -> Ahead {
+        Ahead {
+            ranges: Vec::new(),
+            reach: Vec::new(),
+        }
+    }
+
+    fn from(mut ranges: Vec<(usize, usize)>) -> Ahead {
+        ranges.sort_unstable();
+        let mut ahead = Ahead {
+            ranges,
+            reach: Vec::new(),
+        };
+        ahead.reach_from(0);
+        ahead
+    }
+
+    /// Whether one range asked holds all of `[first, last)`.
+    fn holds(&self, first: usize, last: usize) -> bool {
+        let i = self.ranges.partition_point(|&(a, _)| a <= first);
+        i > 0 && self.reach[i - 1] >= last
+    }
+
+    fn push(&mut self, range: (usize, usize)) {
+        let i = self.ranges.partition_point(|&r| r <= range);
+        self.ranges.insert(i, range);
+        self.reach_from(i);
+    }
+
+    /// `reach` again from range `i` on.
+    fn reach_from(&mut self, i: usize) {
+        self.reach.truncate(i);
+        let mut far = i.checked_sub(1).map_or(0, |i| self.reach[i]);
+        for &(_, b) in &self.ranges[i..] {
+            far = far.max(b);
+            self.reach.push(far);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.ranges.clear();
+        self.reach.clear();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
 }
 
 /// Read by many threads at once (a submission's refreshes run on several),
@@ -145,7 +207,7 @@ struct Journal {
 static JOURNAL: RwLock<Journal> = RwLock::new(Journal {
     written: BTreeMap::new(),
     parts: std::collections::HashMap::with_hasher(std::hash::BuildHasherDefault::new()),
-    ahead: Vec::new(),
+    ahead: Ahead::new(),
     ahead_asked: 0,
     kept: false,
 });
@@ -361,7 +423,7 @@ pub(crate) fn ask_ahead(ranges: impl Iterator<Item = (usize, usize)>) {
     note_hot(&written);
     let mut j = journal_mut();
     j.ahead_asked = next_asking();
-    j.ahead = asked;
+    j.ahead = Ahead::from(asked);
     let now = j.ahead_asked;
     for (page, parts) in written {
         j.note(page, parts, now);
@@ -554,7 +616,7 @@ fn ask_rest(ranges: &[(usize, usize)]) {
     let _all = Asking::hold_all();
     let mut ahead = {
         let mut j = journal_mut();
-        std::mem::take(&mut j.ahead)
+        std::mem::replace(&mut j.ahead, Ahead::new())
     };
     // `ask_ahead` leaves a range that lies alone to `writes`, which asks
     // once per flush: with one asking for the submission that was every
@@ -567,7 +629,7 @@ fn ask_rest(ranges: &[(usize, usize)]) {
             continue;
         }
         let (first, last) = (start / PAGE, end.div_ceil(PAGE));
-        if !ahead.iter().any(|&(a, b)| a <= first && last <= b)
+        if !ahead.holds(first, last)
             && let Some(pages) = kernel_written(first, last)
         {
             written.extend(pages);
@@ -660,8 +722,7 @@ pub(crate) fn asked(start: usize, end: usize) -> Option<(u64, Vec<(usize, u64)>)
     let (first, last) = (start / PAGE, end.div_ceil(PAGE));
     let j = journal();
     j.ahead
-        .iter()
-        .any(|&(a, b)| a <= first && last <= b)
+        .holds(first, last)
         .then(|| (j.ahead_asked, j.written.range(first..last).map(|(&p, &w)| (p, w)).collect()))
 }
 
@@ -680,7 +741,7 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     let (first, last) = (start / PAGE, end.div_ceil(PAGE));
     let of = |j: &Journal| -> Vec<(usize, u64)> { j.written.range(first..last).map(|(&p, &w)| (p, w)).collect() };
     // Asked ahead with the submission's other ranges: the journal has it.
-    let ahead = |j: &Journal| j.ahead.iter().any(|&(a, b)| a <= first && last <= b).then(|| (j.ahead_asked, of(j)));
+    let ahead = |j: &Journal| j.ahead.holds(first, last).then(|| (j.ahead_asked, of(j)));
     if let Some(known) = ahead(&journal()) {
         return Some(known);
     }
@@ -764,7 +825,7 @@ pub(crate) fn nothing_new(start: usize, end: usize, base: usize, copied: &[u64],
         crate::faultbook::note(crate::faultbook::What::Known, first, last, 1);
     }
     let j = journal();
-    if !known && !j.ahead.iter().any(|&(a, b)| a <= first && last <= b) {
+    if !known && !j.ahead.holds(first, last) {
         return false;
     }
     let Some(taken) = first.checked_sub(base).and_then(|from| copied.get(from..last - base)) else {
@@ -3247,7 +3308,7 @@ mod parts_tests {
         let mut j = Journal {
             written: BTreeMap::new(),
             parts: std::collections::HashMap::with_hasher(std::hash::BuildHasherDefault::new()),
-            ahead: Vec::new(),
+            ahead: Ahead::new(),
             ahead_asked: 0,
             kept: false,
         };
@@ -3267,6 +3328,155 @@ mod parts_tests {
         // A page never written before: what was not named was never written.
         assert_eq!(j.note(9, 0b100, 9), 0);
         assert_eq!(j.parts_since(9, 5), 0b100);
+    }
+}
+
+#[cfg(test)]
+mod ahead_tests {
+    use super::Ahead;
+
+    /// What the journal asked before: one asked range that holds the range.
+    fn scanned(ranges: &[(usize, usize)], first: usize, last: usize) -> bool {
+        ranges.iter().any(|&(a, b)| a <= first && last <= b)
+    }
+
+    /// A xorshift, so the ranges are the same every run.
+    fn numbers(mut x: u64) -> impl FnMut(usize) -> usize {
+        move |below| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % below as u64) as usize
+        }
+    }
+
+    /// Ranges overlapping, nested, touching, repeated and empty; asked whole
+    /// or pushed one by one (as [`super::ask_rest`] does): the answer is the
+    /// scan's for every range, those that span two touching ranges among
+    /// them (no single range holds those, and none is merged).
+    #[test]
+    fn holds_answers_as_the_scan_did() {
+        let mut next = numbers(0x9e37_79b9_7f4a_7c15);
+        for round in 0..200 {
+            let count = next(40);
+            let ranges: Vec<(usize, usize)> = (0..count)
+                .map(|_| {
+                    let a = next(300);
+                    (a, a + next(60))
+                })
+                .collect();
+            let whole = Ahead::from(ranges.clone());
+            let mut pushed = Ahead::new();
+            for (n, &range) in ranges.iter().enumerate() {
+                pushed.push(range);
+                for _ in 0..20 {
+                    let first = next(380);
+                    let last = first + next(80);
+                    assert_eq!(
+                        pushed.holds(first, last),
+                        scanned(&ranges[..=n], first, last),
+                        "round {round}: [{first}, {last}) after {:?}",
+                        &ranges[..=n]
+                    );
+                }
+            }
+            for first in 0..380 {
+                for last in first..first + 80 {
+                    assert_eq!(
+                        whole.holds(first, last),
+                        scanned(&ranges, first, last),
+                        "round {round}: [{first}, {last}) in {ranges:?}"
+                    );
+                }
+            }
+        }
+        let touching = Ahead::from(vec![(10, 20), (20, 30)]);
+        assert!(touching.holds(10, 20) && touching.holds(20, 30) && touching.holds(12, 12));
+        assert!(!touching.holds(15, 25), "two ranges hold it, one does not");
+        assert!(!Ahead::new().holds(0, 0));
+        let mut cleared = Ahead::from(vec![(0, 100)]);
+        cleared.clear();
+        assert!(cleared.is_empty() && !cleared.holds(1, 2));
+    }
+
+    /// The looks of a submission, against the scan, in nanoseconds a look:
+    /// `ranges` asked, a look for each of 6,664 refreshes (run 14's frame).
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn holds_costs() {
+        const LOOKS: usize = 6_664;
+        for count in [16, 64, 256, 1024] {
+            let mut next = numbers(count as u64);
+            // Runs of a submission: by start, gaps between them; looks
+            // inside them (as refreshes are), and a few outside.
+            let mut at = 0;
+            let ranges: Vec<(usize, usize)> = (0..count)
+                .map(|_| {
+                    at += 1 + next(4096);
+                    let range = (at, at + 1 + next(2048));
+                    at = range.1;
+                    range
+                })
+                .collect();
+            let looks: Vec<(usize, usize)> = (0..LOOKS)
+                .map(|_| {
+                    let (a, b) = ranges[next(count)];
+                    let first = a + next(b - a);
+                    (first, (first + 1 + next(64)).min(b + next(2)))
+                })
+                .collect();
+            let ahead = Ahead::from(ranges.clone());
+            let timed = |f: &dyn Fn(usize, usize) -> bool| {
+                let began = std::time::Instant::now();
+                let mut held = 0;
+                for _ in 0..50 {
+                    for &(first, last) in &looks {
+                        let (first, last) = std::hint::black_box((first, last));
+                        held += usize::from(f(first, last));
+                    }
+                }
+                (began.elapsed().as_secs_f64() * 1e9 / (50 * LOOKS) as f64, held)
+            };
+            let (scan, held_scan) = timed(&|first, last| scanned(&ranges, first, last));
+            let (search, held_search) = timed(&|first, last| ahead.holds(first, last));
+            assert_eq!(held_scan, held_search);
+            // `ask_rest`: every range pushed one by one, in no order (as a
+            // submission lists them), each looked for first.
+            let mut shuffled = ranges.clone();
+            for i in (1..shuffled.len()).rev() {
+                shuffled.swap(i, next(i + 1));
+            }
+            const ROUNDS: u32 = 20;
+            let began = std::time::Instant::now();
+            for _ in 0..ROUNDS {
+                let mut rest = Ahead::new();
+                for &(first, last) in &shuffled {
+                    if !rest.holds(first, last) {
+                        rest.push((first, last));
+                    }
+                }
+                std::hint::black_box(&rest);
+            }
+            let pushed = began.elapsed().as_secs_f64() * 1e6 / f64::from(ROUNDS);
+            let began = std::time::Instant::now();
+            for _ in 0..ROUNDS {
+                let mut rest = Vec::new();
+                for &(first, last) in &shuffled {
+                    if !scanned(&rest, first, last) {
+                        rest.push((first, last));
+                    }
+                }
+                std::hint::black_box(&rest);
+            }
+            let scanned_rest = began.elapsed().as_secs_f64() * 1e6 / f64::from(ROUNDS);
+            println!(
+                "{count} ranges: scan {scan:.1} ns a look, search {search:.1} ns \
+                 ({:.2} ms against {:.2} ms a frame of {LOOKS} looks); \
+                 ask_rest pushing them {pushed:.1} us against {scanned_rest:.1} us",
+                scan * LOOKS as f64 / 1e6,
+                search * LOOKS as f64 / 1e6
+            );
+        }
     }
 }
 
