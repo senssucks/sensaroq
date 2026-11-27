@@ -8113,6 +8113,19 @@ static REFRESH_WORK: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::ato
 /// preludes and the lists gathered after each list's steps.
 static OTHER_STEPS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
+/// `VICTORY_REFRESH_FILTER_FIRST=1` (off by default): of a flush of many
+/// refreshes, those known to copy nothing are told apart on the submitting
+/// thread before any other thread is woken, as for a few. In the world some
+/// 5,500 of 6,300 refreshes a frame copy nothing, in about 37 flushes, and
+/// the threads were woken for each flush of more than 256 only to find so
+/// (session 15: refreshes 26 ms of the submitting thread's 68). Whether the
+/// asking alone is cheaper than the wake-ups: the line's "the refreshes'
+/// work" (e21d80f) tells.
+fn filter_first() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_REFRESH_FILTER_FIRST").is_some_and(|v| v == "1"))
+}
+
 /// Adds the time since its start to a counter when dropped.
 struct TimeTo<'a>(&'a std::sync::atomic::AtomicU64, std::time::Instant);
 
@@ -8795,7 +8808,7 @@ impl Batch {
         // many: then beside the others.
         const FEW: usize = 256;
         let mut spans = spans;
-        let many = spans.len() > FEW;
+        let many = spans.len() > FEW && !filter_first();
         if !many {
             let all = spans.len();
             spans.retain(|(shadow, from, to)| !nothing_new_timed(shadow, *from, *to - *from));
@@ -8938,7 +8951,7 @@ impl Batch {
         // once a frame: on the threads, below.)
         const FEW: usize = 256;
         let light = crate::watch::light();
-        if light && self.refreshes.len() <= FEW {
+        if light && (self.refreshes.len() <= FEW || filter_first()) {
             let started = std::time::Instant::now();
             let all = self.refreshes.len();
             self.refreshes.retain(|(shadow, from, to)| !nothing_new_timed(shadow, *from, *to - *from));
@@ -8970,7 +8983,7 @@ impl Batch {
                 let refreshes = std::mem::take(&mut self.refreshes);
                 crate::shadow::wide_each(refreshes.len(), move |i| {
                     let (shadow, from, to) = &refreshes[i];
-                    if refreshes.len() > FEW && nothing_new_timed(shadow, *from, *to - *from) {
+                    if refreshes.len() > FEW && !filter_first() && nothing_new_timed(shadow, *from, *to - *from) {
                         FLUSHES[2].fetch_add(1, Ordering::Relaxed);
                         return;
                     }
