@@ -9052,7 +9052,9 @@ impl Batch {
         FLUSHES[3].fetch_add(spans.len() as u64, Ordering::Relaxed);
         let group = crate::texture::refresh_group_size();
         let groups = due.len().div_ceil(group);
-        crate::shadow::wide_each(spans.len() + groups, move |i| {
+        // (The textures' groups one to a thread; the copies as
+        // `VICTORY_WIDE_CHUNK` says, 1 by default: as before.)
+        crate::shadow::wide_each_from(spans.len() + groups, groups, crate::shadow::wide_chunk(), move |i| {
             // The textures first: they are the longer pieces.
             let Some(i) = i.checked_sub(groups) else {
                 if group == 1 {
@@ -9224,7 +9226,7 @@ impl Batch {
             if light {
                 // A number to a free thread, not a job to each copy.
                 let refreshes = std::mem::take(&mut self.refreshes);
-                crate::shadow::wide_each(refreshes.len(), move |i| {
+                crate::shadow::wide_each_from(refreshes.len(), 0, crate::shadow::wide_chunk(), move |i| {
                     let (shadow, from, to) = &refreshes[i];
                     if refreshes.len() > FEW && !filter_first() && nothing_new_timed(shadow, *from, *to - *from) {
                         FLUSHES[2].fetch_add(1, Ordering::Relaxed);
