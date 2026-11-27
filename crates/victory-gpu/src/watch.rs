@@ -143,6 +143,7 @@ struct Journal {
 /// ranges. `reach[i]` is the furthest end of `ranges[..=i]`, so "some range
 /// with `a <= first` ends at `last` or later", which is "one range holds
 /// `[first, last)`", is one binary search.
+#[derive(Clone)]
 struct Ahead {
     ranges: Vec<(usize, usize)>,
     reach: Vec<usize>,
@@ -709,7 +710,7 @@ pub(crate) fn ask_more(ranges: &[(usize, usize)]) -> bool {
     // (Outside the journal's lock: `published` has locks of its own.)
     let all_held = ranges.iter().all(|&(start, end)| {
         let (first, last) = (start / PAGE, end.div_ceil(PAGE));
-        start >= end || published(start, end) || held.iter().any(|&(a, b)| a <= first && last <= b)
+        start >= end || published(start, end) || held.holds(first, last)
     });
     if all_held {
         return false;
