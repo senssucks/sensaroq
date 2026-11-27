@@ -49,6 +49,16 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [cb412956](https://github.com/Peppacodes/playablegames-peppa/commit/cb412956) | Landed lists reset on their own thread (`VICTORY_LAND_ASIDE`) | Peppacodes |
 | [7f5d8261](https://github.com/Peppacodes/playablegames-peppa/commit/7f5d8261) | Windows never written stop being declared (`VICTORY_QUIET_WINDOWS`) | Peppacodes |
 
+### trustno1-coder/VIctory-NVIDIA (pull requests after sensaroq was based on it)
+
+| Source | What | Author |
+|---|---|---|
+| [PR #57](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/57) | Pooled upload buffers for list copies; pressure keeps 128 MiB of spares (`VICTORY_UPLOAD_POOL_MB`, off by default here) | Yorivel |
+| [PR #59](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/59) | Texture reads under an epoch check, not the mapping lock (`VICTORY_REFRESH_LOCKLESS`); one mapping read for up to eight textures (`VICTORY_REFRESH_BATCH`) | superboynick |
+| [PR #87](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/87) | The mapping lock in 2 MiB address stripes (`VICTORY_MAPPING_STRIPES`) | superboynick |
+| [PR #44](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/44) | Physical pages from sections of at most n MiB (`VICTORY_SECTION_MB`) | CLHelper |
+| [PR #81](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/81) | Library saves wait out bursts and memory pressure (`VICTORY_LIBRARY_SAVE_LATER`, off by default here) | harrisotiropoulos-jpg |
+
 ### xcl-dev/xcl (ideas only, re-written; XCL is GPL-2.0-only)
 
 | Source | What | Author |
