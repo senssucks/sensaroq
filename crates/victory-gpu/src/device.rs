@@ -373,11 +373,16 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
     save_pipeline_description(SLOT, calls, desc as usize);
     // 0x218: a compute pipeline in console pieces (`fspx_pieces`).
     #[cfg(windows)]
-    if SLOT == 0x218 && crate::toggled!("VICTORY_FSPX_PIPELINES") && let Some(pieces) = fspx_pieces(desc as usize) {
+    // Off unless `VICTORY_FSPX_PIPELINES=1`: with them on from a7bf1f9 every
+    // session showed a gray picture (2 shaders refused before, ~800 after).
+    if SLOT == 0x218
+        && std::env::var_os("VICTORY_FSPX_PIPELINES").is_some_and(|v| v == "1")
+        && let Some(pieces) = fspx_pieces(desc as usize)
+    {
         let [packet, hash, code, meta] = pieces.each_ref().map(Vec::as_slice);
-        let hr = crate::pipeline::compute_from_pieces(packet, hash, code, meta, _iid, out);
+        let hr = crate::pipeline::compute_from_pieces(packet, hash, code, meta, _iid, out).unwrap_or(E_NOTIMPL);
         if calls <= 4 || calls.is_power_of_two() {
-            tracing::info!(calls, hr = format_args!("{:#x}", hr), code_bytes = code.len(), "device method 0x218: a compute pipeline made of console pieces (VICTORY_FSPX_PIPELINES=0: not)");
+            tracing::info!(calls, hr = format_args!("{:#x}", hr), code_bytes = code.len(), "device method 0x218: a compute pipeline made of console pieces, or refused as it does not translate (VICTORY_FSPX_PIPELINES=1)");
         }
         return hr;
     }
