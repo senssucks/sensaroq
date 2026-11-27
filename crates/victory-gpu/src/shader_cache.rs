@@ -150,7 +150,7 @@ pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
 }
 
 /// Whether `container` is a shader `VICTORY_WAVE_LOCAL_FIRST` names (16 hex
-/// digits of its hash, as `VICTORY_LEAVE_OUT` takes them; off by default):
+/// digits of its hash, as `VICTORY_LEAVE_OUT` takes them, or `all`; off by default):
 /// translated with each host wave as a wave of its own where that is exact
 /// (`victory_shader::emit::with_local_first`). For the decal heap's defrag
 /// (02384a60fda6f2d0): the faces need it, and with the halves meeting by
@@ -165,6 +165,11 @@ pub(crate) fn local_first(container: &[u8]) -> bool {
             .filter(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
             .collect()
     });
+    // `all`: every program, where the check finds it exact.
+    static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ALL.get_or_init(|| std::env::var("VICTORY_WAVE_LOCAL_FIRST").is_ok_and(|v| v.split(',').any(|h| h.trim().eq_ignore_ascii_case("all")))) {
+        return true;
+    }
     !hashes.is_empty() && hashes.contains(&blake3::hash(container).to_hex()[..16].to_owned())
 }
 
