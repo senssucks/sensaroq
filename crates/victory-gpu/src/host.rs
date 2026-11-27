@@ -9768,6 +9768,20 @@ impl Meter {
                             lists[1],
                             lists[3]
                         );
+                        let [n, bytes, asked, carded] = crate::shadow::window_room();
+                        let [card, before] = [0, 1].map(|i| crate::shadow::CARD_BYTES[i].load(Ordering::Relaxed));
+                        tracing::info!(
+                            "of it ours: buffers' copies in the card's memory {} MB, with as much of the PC's for their CPU side \
+                             ({} MB of twins); windows of title memory {n} with {} MB ({} MB between the first and the last byte \
+                             ever asked for in each; {carded} of them in the card's memory, with as much of the PC's), \
+                             card room for windows {} MB, mapped {} MB",
+                            card >> 20,
+                            before >> 20,
+                            bytes >> 20,
+                            asked >> 20,
+                            crate::shadow::WINDOW_CARD_BYTES.load(Ordering::Relaxed) >> 20,
+                            crate::shadow::WINDOW_MAPPED_BYTES.load(Ordering::Relaxed) >> 20
+                        );
                     }
                     let making = take_making();
                     if !making.is_empty() && since > 0.0 {

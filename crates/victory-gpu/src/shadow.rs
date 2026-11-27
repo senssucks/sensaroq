@@ -265,7 +265,7 @@ fn card_limits() -> (u64, u64) {
 }
 
 /// Bytes alive of copies' card sides, and of their "before" twins.
-static CARD_BYTES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+pub(crate) static CARD_BYTES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
 /// Whether the texture queue leaves room on the card for the card copies
 /// of title buffers that are not made yet
@@ -518,7 +518,7 @@ fn default_window_card_mb(local_vram_budget: Option<u64>) -> u64 {
 }
 
 /// Bytes alive of windows' card sides ([`window_card_most`]).
-static WINDOW_CARD_BYTES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static WINDOW_CARD_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// A buffer in the card's memory for a window of `size` bytes, if it is to
 /// be there ([`window_card_most`]).
@@ -556,7 +556,7 @@ fn window_mapped_most() -> u64 {
 }
 
 /// Bytes alive of windows in card memory the CPU maps.
-static WINDOW_MAPPED_BYTES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static WINDOW_MAPPED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// A buffer for a window of `size` bytes in card memory the CPU maps, if it is
 /// to be there ([`window_mapped_most`]).
@@ -2942,6 +2942,23 @@ mod stale_tests {
         assert_eq!(stale_pages_in(base, &copied, at(0x101) + 8, at(0x101) + 16, &[]), [0x101]);
         assert!(stale_pages_in(base, &copied, at(0x104), at(0x106), &[(0x104, 9)]).is_empty());
     }
+}
+
+/// For the process memory line, in every build: the windows alive, their
+/// bytes, the bytes between the lowest and the highest address ever asked
+/// for in each (what a finer grid, `VICTORY_WINDOW_KB`, could hold them
+/// to), and the windows of them with a copy in the card's memory (whose
+/// PC side is a whole copy too).
+pub(crate) fn window_room() -> [u64; 4] {
+    let loose = LOOSE.read().unwrap_or_else(|e| e.into_inner());
+    let mut out = [0u64; 4];
+    for s in loose.values() {
+        out[0] += 1;
+        out[1] += s.len;
+        out[2] += s.asked[1].load(Ordering::Relaxed).saturating_sub(s.asked[0].load(Ordering::Relaxed));
+        out[3] += u64::from(s.card.is_some());
+    }
+    out
 }
 
 /// Copies of windows outside buffers let go since the start, and their
