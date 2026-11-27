@@ -60,13 +60,20 @@ pub fn run(
     // is loaded before anything of the title or the host GPU, and fails soft;
     // only if it offers one of them does the title render through its
     // FidelityFX path, which DLSS takes over (`native_1440p::prepare_upscaler`).
-    let asked = victory_hle::streamline::Asked::from_env().map_err(anyhow::Error::msg)?;
+    let mut asked = victory_hle::streamline::Asked::from_env().map_err(anyhow::Error::msg)?;
+    asked.series_s = matches!(console, Console::SeriesS);
     let available = victory_hle::streamline::init(&asked);
     // `VICTORY_FSR_PATH=1`: the title's FidelityFX path at VICTORY_DLSS_MODE's
     // scale with its own FidelityFX upscaling (no Streamline): DLSS's
     // comparison, and on Series X what that path alone looks like.
     let fsr_path = std::env::var_os("VICTORY_FSR_PATH").is_some_and(|v| v == "1");
-    let upscaler = (available.dlss || available.framegen || fsr_path).then_some(asked.mode);
+    // (FSR 3 frame generation reads the upscaling's inputs as DLSS Frame
+    // Generation does: the title renders through its FidelityFX path too.)
+    let upscaler = (available.dlss || available.framegen || available.fsr_framegen || fsr_path).then_some(asked.mode);
+    // What this card does for frame generation (also on the picture for the first seconds).
+    for (i, line) in victory_hle::streamline::notice_at_start().iter().enumerate() {
+        println!("{}{line}", if i == 0 { "frame gen      " } else { "               " });
+    }
     if fsr_path && !asked.any() {
         println!("upscaling      the title's own FidelityFX at the {} scale (VICTORY_FSR_PATH=1)", asked.mode.name());
     }
@@ -219,6 +226,10 @@ pub fn run(
         inner: &resolver,
         dlls: &dlls,
     };
+    // The title's Bink exports go through the movie skipper when
+    // VICTORY_SKIP_BINK asks for it (bound as before otherwise); beneath
+    // the FidelityFX interposer, which only looks at its own DLL.
+    let with_dlls = victory_hle::modules::bink::SkipMovies { inner: &with_dlls };
     let show = |name: &str, report: BindReport| {
         println!(
             "bound          {name}: {} hle, {} host, {} title, {} missing",
@@ -519,6 +530,9 @@ impl LateDlls {
                     inner: &old,
                     dlls: &new,
                 };
+                // As at startup: Bink imports of DLLs loaded later too
+                // (VICTORY_SKIP_BINK; bound as before otherwise).
+                let resolver = victory_hle::modules::bink::SkipMovies { inner: &resolver };
                 for (name, dll) in &new {
                     println!(
                         "title dll      {name} at {:#x} (loaded by the title)",

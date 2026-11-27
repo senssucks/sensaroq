@@ -32,11 +32,13 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
         return make(&dir, &these);
     }
     let began = Instant::now();
+    // (A first preload on a PC no run has written pipelines down on yet: none known.)
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let until = minutes.map(|m| began + Duration::from_secs_f64(m.max(0.0) * 60.0));
     victory_hle::known_pipelines::use_translations(dir.with_file_name("shaders"));
     // What the processes make is put in the runs' pipeline library at the
     // end (`known::store`): before the host is made, which reads it.
-    known::use_library(&dir);
+    known::warm_library(&dir);
     let fingerprint = known::fingerprint();
     let done_file = dir.join("warm-done.txt");
     let bad_file = dir.join("warm-bad.txt");
@@ -211,6 +213,60 @@ fn bar(count: usize, all: usize, began: Instant, until: Option<Instant>) {
         min_sec(left)
     );
     let _ = std::io::stdout().flush();
+}
+
+/// `victory preload`'s last step: the pipelines a run makes while it loads
+/// (the early list) and those that take a second or more, made again in this
+/// process and stored in the host pipeline library the runs load at their
+/// start. `run` made them in processes of their own first, so the driver has
+/// them and they come quickly; those that ended a process are left out. Not
+/// all the known ones: one process holding the compiler's memory for 88,000
+/// pipelines is what `AT_ONCE` keeps `run` from.
+pub fn into_library(jobs: Option<usize>) -> Result<()> {
+    let dir = folder()?;
+    let cfg = victory_core::Config::load()?;
+    known::use_library(cfg.cache_subdir("shaders")?);
+    let keys = known::keys(&dir);
+    let read = |file: &str| std::fs::read_to_string(dir.join(file)).unwrap_or_default();
+    let (bad, early, slow) = (read("warm-bad.txt"), read("early-pipelines.txt"), read("slow-pipelines.txt"));
+    let bad: HashSet<&str> = bad.lines().filter_map(|l| l.split(' ').next()).collect();
+    let early: HashSet<&str> = early.lines().collect();
+    let slow: HashSet<&str> = slow.lines().filter_map(|l| l.split(' ').next()).filter(|k| !k.is_empty()).collect();
+    let mut all: Vec<usize> = (0..keys.len())
+        .filter(|&n| {
+            let key = keys[n].as_str();
+            !bad.contains(key) && (early.contains(key) || slow.contains(key))
+        })
+        .collect();
+    all.sort_by_key(|&n| (!early.contains(keys[n].as_str()), &keys[n]));
+    let threads = jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()) * 2 / 3).max(1);
+    println!("into the pipeline library: {} pipelines (loading and slow ones), {threads} threads", all.len());
+    let began = Instant::now();
+    let (count, made) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    std::thread::scope(|s| {
+        for t in 0..threads {
+            let these: Vec<usize> = all.iter().copied().skip(t).step_by(threads).collect();
+            let (count, made, total, dir) = (&count, &made, all.len(), &dir);
+            s.spawn(move || {
+                known::make(dir, &these, |_, came| {
+                    let Some((_, there)) = came else { return };
+                    made.fetch_add(usize::from(there), Ordering::Relaxed);
+                    let n = count.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n.is_multiple_of(500) {
+                        println!("{n} of {total} in the library, {:.0} s", began.elapsed().as_secs_f64());
+                    }
+                });
+            });
+        }
+    });
+    known::keep_library();
+    println!(
+        "{} of {} in the pipeline library in {:.0} s",
+        made.load(Ordering::Relaxed),
+        all.len(),
+        began.elapsed().as_secs_f64()
+    );
+    Ok(())
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

@@ -225,7 +225,7 @@ pub fn use_translations(dir: PathBuf) {
 
 /// `victory warm`'s own process keeps the run's pipeline library in `dir`
 /// (called before anything asks for the host).
-pub fn use_library(dir: &Path) {
+pub fn warm_library(dir: &Path) {
     super::library::use_pipeline_cache(dir.to_path_buf());
 }
 
@@ -276,6 +276,19 @@ pub fn store(dir: &Path, which: &[usize]) -> (usize, usize) {
         let _ = std::fs::remove_file(file);
     }
     (stored, not)
+}
+
+/// The translations and the host pipeline library of a run are in the cache
+/// folder `shaders`'s neighbours: what [`make`] makes from now on is stored in
+/// that library (`victory preload`), which the runs load at their start.
+pub fn use_library(shaders: PathBuf) {
+    super::library::use_pipeline_cache(shaders.with_file_name("pipelines"));
+    crate::shader_cache::use_shader_cache(shaders);
+}
+
+/// Writes the library [`use_library`] filled.
+pub fn keep_library() {
+    super::library::save(true);
 }
 
 /// Makes the host pipelines of those of `which` (numbers in the file) and

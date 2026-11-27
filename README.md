@@ -5,20 +5,72 @@
 
 # VIctory on NVIDIA
 
+> **Reporting a problem?** Please attach **both** logs from the run that went
+> wrong. Without them we can only guess. Paste `%LOCALAPPDATA%` into the address
+> bar of File Explorer to get there.
+>
+> 1. **The play log**, in `%LOCALAPPDATA%\victory\logs\`: the newest
+>    `victory-nvidia-play-<date>-<time>-<number>.log` (from `victory.exe`) or
+>    `victory-nvidia-<date>-<time>.log` (from the script launcher). The window
+>    shows its path at the start, on the line `Log: ...`.
+> 2. **The crash log**: `%LOCALAPPDATA%\VIctory\data\7952987A\crashes.log`, and,
+>    if there is one from that run, the newest `victory-<date>-<time>-<number>.crash.log`
+>    in `%LOCALAPPDATA%\VIctory\data\7952987A\temp\`.
+>
+> Also say which GPU, Windows version (10 or 11) and release you used.
+
+## Frame generation: what your card supports
+
+| Your card | Frame generation | Limits |
+| --- | --- | --- |
+| GeForce RTX 40 and RTX 50 | **DLSS frame generation** | 2x on RTX 40; more than 2x (up to 6x) needs an RTX 50 |
+| GeForce RTX 20 and RTX 30 | **AMD FSR 3 frame generation** (DLSS frame generation needs an RTX 40 or later) | **2x at most**. DLSS upscaling still works on these cards, so the Series X profile is fine |
+| Other cards (no DLSS) | **AMD FSR 3 frame generation** | **2x at most, Series S profile only** (F1 menu, CONSOLE): without DLSS the game's own upscaler, which FSR 3 needs, only takes the Series S sizes. Not tested here |
+
+- **At every start the game tells you** which one your card runs, and why
+  not if it can't, at the top of the picture for the first 30 seconds (and
+  in the console window).
+- **F1 menu, FRAME GEN TYPE**: AUTO (DLSS where the card has it, else FSR 3),
+  DLSS, or FSR 3 (also on an RTX 40/50, if you prefer it). FRAME GENERATION
+  switches it off or on.
+- FSR 3 needs AMD's FidelityFX DLLs (`amd_fidelityfx_loader_dx12.dll` and
+  `amd_fidelityfx_framegeneration_dx12.dll`, from AMD's FidelityFX SDK). They
+  are AMD's and not part of this program: put them in a `fidelityfx` folder
+  next to `victory.exe`, or name their folder with `VICTORY_FIDELITYFX_DIR`.
+
 ## Quick start: how to run it
 
-**1. Have these first**
+**The easy way: one file, nothing to build**
 
-- Windows 10 or 11, 32 GB of RAM or more, an SSD, and an NVIDIA GeForce RTX
-  card with a recent driver.
-- [Rust](https://rustup.rs) and the
-  [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
-  with "Desktop development with C++" (the layer is built on your PC the
-  first time you start it).
-- **Your own dump** of the title's Xbox Series build v1.0.2.1: the folder
-  with `game_scarlett_master.exe`. This repository contains no game files.
+1. Download `victory.exe` from the
+   [latest release](https://github.com/trustno1-coder/VIctory-NVIDIA/releases/latest).
+2. Put it into the folder of **your own dump** of the title's Xbox Series
+   build v1.0.2.1, next to `game_scarlett_master.exe`.
+3. Double-click it. Windows may say the publisher is unknown (the file is not
+   signed): "More info", then "Run anyway".
 
-**2. Run these in PowerShell**
+- The first start asks once whether to download NVIDIA's DLSS and frame
+  generation files (about 70 MB) from NVIDIA's own GitHub. They are NVIDIA's
+  and are not part of this program; say no and the game still runs, with its
+  own upscaling and no frame generation.
+- Nothing is written into your game folder: settings, saves, caches, logs and
+  NVIDIA's files are kept under `%LOCALAPPDATA%\victory`.
+- You need Windows 10 or 11, 32 GB of RAM or more, an SSD and an NVIDIA
+  GeForce RTX card with a recent driver. This repository and its releases
+  contain no game files.
+
+**In the game**
+
+- **F1** brings up the settings menu (arrow keys pick and change, Enter does
+  it): DLSS, frame generation, frame rate cap and more.
+- **F3** shows the stats panel (frame rate, frame generation, draws, GPU and
+  memory numbers).
+
+**Building it yourself instead**
+
+Install [Rust](https://rustup.rs) and the
+[Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+with "Desktop development with C++", then in PowerShell:
 
 ```powershell
 git clone https://github.com/trustno1-coder/VIctory-NVIDIA
@@ -27,20 +79,8 @@ cd VIctory-NVIDIA
 powershell -ExecutionPolicy Bypass -File scripts\play-nvidia.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe'
 ```
 
-- Put the path to **your** `game_scarlett_master.exe` in the last line.
-- `Get-NVIDIA-DLSS.cmd` is needed once. It downloads NVIDIA's DLSS and frame
-  generation files (about 70 MB) from NVIDIA's own GitHub; they are NVIDIA's
-  and are not part of this repository. Skip it and the game still runs, with
-  its own upscaling and no frame generation.
-- The first start builds the layer, which takes a few minutes. After that the
-  last line alone starts the game.
-
-**3. In the game**
-
-- **F1** brings up the settings menu (arrow keys pick and change, Enter does
-  it): DLSS, frame generation, frame rate cap and more.
-- **F3** shows the stats panel (frame rate, frame generation, draws, GPU and
-  memory numbers).
+Put the path to **your** `game_scarlett_master.exe` in the last line. The
+first start builds the layer, which takes a few minutes.
 
 Options, requirements in full and the details are under
 [How to run it](#how-to-run-it).
@@ -258,6 +298,7 @@ fork has always had; its options:
 | `-SeriesS` | the Series S profile: 1280x720 inside, faster, softer |
 | `-Res 1080to1440` / `4k` | scene at 1080p upscaled by the title / the stock 3840x2160 output |
 | `-NoFrameGenReady` | frame generation only with `-FrameGen` (it is otherwise made ready at every start, so the menu can switch it) |
+| `-FgType auto` / `dlss` / `fsr` | which frame generation (see the top of this page); FSR 3's DLLs from `VICTORY_FIDELITYFX_DIR`, else `amd-sdk\FidelityFX\bin` here |
 | `-Build diag` | the diagnostics build (slower; captures, timelines, recording time in the F3 panel) |
 | `-More @{VICTORY_X='1'}` | add or override any switch |
 
