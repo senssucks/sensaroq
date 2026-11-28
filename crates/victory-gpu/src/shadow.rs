@@ -4400,6 +4400,7 @@ impl Shadow {
                 self.watched.store(if guarded { GUARDED } else { 1 }, Ordering::Relaxed);
                 let copied = self.copy_stale(from, to, now, &written);
                 REFRESH_BYTES[0].fetch_add(copied as u64, Ordering::Relaxed);
+                copy_top::note(self.start, self.len, copied as u64, false);
                 self.refresh_check(from, to);
                 #[cfg(feature = "diagnostics")]
                 {
@@ -4420,6 +4421,7 @@ impl Shadow {
         crate::copystat::whole(from, to - from, started.elapsed().as_micros() as u64);
         REFRESH_BYTES[1].fetch_add((to - from) as u64, Ordering::Relaxed);
         REFRESH_BYTES[2].fetch_add(1, Ordering::Relaxed);
+        copy_top::note(self.start, self.len, (to - from) as u64, true);
         to - from
     }
 
@@ -6486,6 +6488,71 @@ pub(crate) fn near(va: u64) -> String {
 /// write watch or the guards said they changed, bytes copied whole (a copy
 /// not watched), and how many whole copies.
 static REFRESH_BYTES: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+/// The buffers whose refreshes copy the most (`VICTORY_COPY_TOP=1`, off by
+/// default): every 30 s a line names the 12 that copied the most bytes since
+/// the last, by title address and size, with how many refreshes copied
+/// something and how much of it was whole copies. Counted in 16 shards by
+/// address; the line is written by a thread of its own. s38/s39: 47-170 MB
+/// a frame copied in the open world, 50 ms of all threads' time, with no
+/// line saying which buffers.
+mod copy_top {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, Once};
+
+    /// (title address, size) -> (bytes, refreshes, bytes copied whole).
+    type Counts = HashMap<(u64, u64), (u64, u64, u64)>;
+    static SHARDS: [Mutex<Option<Counts>>; 16] = [const { Mutex::new(None) }; 16];
+
+    fn on() -> bool {
+        crate::asked_for!("VICTORY_COPY_TOP")
+    }
+
+    pub(super) fn note(start: u64, len: u64, bytes: u64, whole: bool) {
+        if bytes == 0 || !on() {
+            return;
+        }
+        static STARTED: Once = Once::new();
+        STARTED.call_once(|| {
+            let _ = std::thread::Builder::new().name("victory-copy-top".into()).spawn(|| loop {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                line();
+            });
+        });
+        let shard = ((start >> 16) as usize ^ (start >> 24) as usize) & 15;
+        let mut counts = SHARDS[shard].lock().unwrap_or_else(|e| e.into_inner());
+        let c = counts.get_or_insert_with(HashMap::new).entry((start, len)).or_default();
+        c.0 += bytes;
+        c.1 += 1;
+        if whole {
+            c.2 += bytes;
+        }
+    }
+
+    fn line() {
+        let mut all: Vec<((u64, u64), (u64, u64, u64))> = Vec::new();
+        for shard in &SHARDS {
+            let taken = shard.lock().unwrap_or_else(|e| e.into_inner()).take();
+            all.extend(taken.into_iter().flatten());
+        }
+        let total: u64 = all.iter().map(|(_, c)| c.0).sum();
+        all.sort_unstable_by(|a, b| b.1.0.cmp(&a.1.0));
+        let mb = |b: u64| b as f64 / (1 << 20) as f64;
+        let top: Vec<String> = all
+            .iter()
+            .take(12)
+            .map(|((start, len), (bytes, n, whole))| {
+                format!("{start:#x} ({:.2} MB): {:.1} MB in {n} ({:.1} MB whole)", mb(*len), mb(*bytes), mb(*whole))
+            })
+            .collect();
+        tracing::info!(
+            "buffers whose refreshes copied the most in the last 30 s (VICTORY_COPY_TOP): {:.1} MB in all over {} buffers; {}",
+            mb(total),
+            all.len(),
+            top.join("; ")
+        );
+    }
+}
 
 /// See [`REFRESH_BYTES`].
 pub(crate) fn take_refresh_bytes() -> [u64; 3] {

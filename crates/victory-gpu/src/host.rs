@@ -1934,6 +1934,10 @@ struct PreludePlan {
     syncs: Vec<(std::sync::Arc<crate::resource::HostTexture>, std::sync::Arc<crate::resource::Twin>, bool)>,
     uploads: Vec<crate::texture::PreludeUpload>,
     barriers: Vec<D3D12_RESOURCE_BARRIER>,
+    /// Title textures whose staging buffer the prelude detiles on the card
+    /// (`crate::gpudetile`), and the submission they are detiled for.
+    detiles: Vec<std::sync::Arc<crate::texture::Staging>>,
+    submission: u64,
 }
 
 // SAFETY: D3D12 objects (free-threaded) named by barriers and textures; a
@@ -2808,6 +2812,9 @@ struct Deferred {
     /// Title textures whose upload the list's prelude records if the check at
     /// submission finds it due (`crate::texture::prelude_uploads`).
     prelude_uploads: Vec<crate::texture::PreludeUpload>,
+    /// Title textures whose staging buffer the list's prelude detiles on the
+    /// card before the list copies from it (`crate::gpudetile`).
+    detiles: Vec<std::sync::Arc<crate::texture::Staging>>,
     /// The bytes of `uploads` (counted in [`ALIVE`] while they are held).
     upload_bytes: u64,
     /// Host objects the list's commands name (pipelines, root signatures,
@@ -6990,12 +6997,12 @@ impl Host {
             // (None unless `VICTORY_PRELUDE_UPLOADS=1`.)
             let uploads = list.prelude_uploads(&mut batch);
             if wide_preludes {
-                if let Some(plan) = list.prelude_plan(&uploads) {
+                if let Some(plan) = list.prelude_plan(&uploads, this_submission) {
                     places.push(lists.len());
                     lists.push(None);
                     plans.push((list, plan));
                 }
-            } else if let Some(prelude) = list.prelude(&uploads) {
+            } else if let Some(prelude) = list.prelude(&uploads, this_submission) {
                 lists.push(Some(prelude));
             }
             lists.push(list.list.cast().ok());
@@ -8168,15 +8175,15 @@ impl HostList {
     /// `crate::texture::prelude_uploads`) are copied into their host copies
     /// here, right before the list runs (Belobug/VIctory-Belobug-AMD
     /// 5d6bd84).
-    fn prelude(&self, uploads: &[(crate::texture::PreludeUpload, bool)]) -> Option<ID3D12CommandList> {
-        let plan = self.prelude_plan(uploads)?;
+    fn prelude(&self, uploads: &[(crate::texture::PreludeUpload, bool)], submission: u64) -> Option<ID3D12CommandList> {
+        let plan = self.prelude_plan(uploads, submission)?;
         self.record_prelude(&plan)
     }
 
     /// What [`HostList::prelude`] records, decided: the part that must go
     /// list by list in their order (each list's textures start in the
     /// states the one before left them in). `None`: nothing to record.
-    fn prelude_plan(&self, uploads: &[(crate::texture::PreludeUpload, bool)]) -> Option<PreludePlan> {
+    fn prelude_plan(&self, uploads: &[(crate::texture::PreludeUpload, bool)], submission: u64) -> Option<PreludePlan> {
         const COPY_DEST: u32 = 0x400;
         const COPY_SOURCE: u32 = 0x800;
         let host_state = |state: u32| D3D12_RESOURCE_STATES(state as i32);
@@ -8269,7 +8276,8 @@ impl HostList {
             (real != *first)
                 .then(|| transition(&copy.texture, host_state(real), host_state(*first)))
         }));
-        if barriers.is_empty() && syncs.is_empty() && uploads.is_empty() {
+        let detiles: Vec<_> = self.deferred().detiles.clone();
+        if barriers.is_empty() && syncs.is_empty() && uploads.is_empty() && detiles.is_empty() {
             return None;
         }
         Some(PreludePlan {
@@ -8278,6 +8286,8 @@ impl HostList {
             syncs,
             uploads: uploads.iter().map(|(u, _)| u.clone()).collect(),
             barriers,
+            detiles,
+            submission,
         })
     }
 
@@ -8285,7 +8295,8 @@ impl HostList {
     /// only this list's own prelude list and may run on any thread
     /// ([`prelude_wide`]).
     fn record_prelude(&self, plan: &PreludePlan) -> Option<ID3D12CommandList> {
-        let PreludePlan { aliasing, to_copy, syncs, uploads, barriers } = plan;
+        let PreludePlan { aliasing, to_copy, syncs, uploads, barriers, detiles, submission } = plan;
+        let submission = *submission;
         let Some((allocator, list)) = self
             .prelude
             .get_or_init(|| host().and_then(|h| h.make_prelude()))
@@ -8307,11 +8318,19 @@ impl HostList {
                 for (depth, twin, colour) in syncs {
                     record_twin_copy(list, &depth.texture, twin, *colour);
                 }
+                // Buffers only: detile before any prelude texture copy reads them.
+                for upload in uploads {
+                    upload.staging().record_detile(list, submission);
+                }
                 for upload in uploads {
                     upload.record(list);
                 }
                 if !barriers.is_empty() {
                     list.ResourceBarrier(barriers);
+                }
+                // Buffers only: the textures' states above are not touched.
+                for staging in detiles {
+                    staging.record_detile(list, submission);
                 }
                 list.Close()
             })
@@ -8915,6 +8934,13 @@ impl HostList {
     /// submitted, keeping it alive until the list is reset.
     pub(crate) fn defer_texture(&self, staging: std::sync::Arc<crate::texture::Staging>) {
         self.deferred().copies.push(Step::Texture(staging));
+    }
+
+    /// The list's copies of a title texture read what the card detiles
+    /// from its staging buffer (`crate::gpudetile`): the list's prelude
+    /// records the detiling at submission.
+    pub(crate) fn detile_first(&self, staging: std::sync::Arc<crate::texture::Staging>) {
+        self.deferred().detiles.push(staging);
     }
 
     /// [`HostList::defer_texture`] of a texture whose upload the list's
@@ -10752,6 +10778,42 @@ struct Presenter {
     notice: panel::Notice,
     /// The F1 settings menu.
     menu: menu::Menu,
+    /// The swap chain lets a frame be shown at once ([`tearing`]): its flags, kept for
+    /// ResizeBuffers, which may not change them.
+    tearing: bool,
+    /// Presents ask for that; off for the rest of the run once one such present is refused.
+    presents_tearing: bool,
+    /// A refused present was logged.
+    present_refused: bool,
+}
+
+/// Whether the swap chain lets a frame be shown as soon as it is presented, not at the screen's
+/// next refresh (`DXGI_FEATURE_PRESENT_ALLOW_TEARING`). Without it a
+/// window in front, which Windows then shows without its compositor ("independent flip"), had
+/// each frame wait for a refresh with two buffers: frame times rounded up to whole refreshes,
+/// about 2 fps fewer than the same window behind another (2026-11-28). On a G-SYNC or FreeSync
+/// screen nothing tears; on others a frame may. `VICTORY_TEARING=1` (off by default here;
+/// trustno1-coder/VIctory-NVIDIA v2026.11.27.10, on by default there).
+fn tearing(factory: &IDXGIFactory2) -> bool {
+    if !std::env::var("VICTORY_TEARING").is_ok_and(|v| v.trim() == "1") {
+        return false;
+    }
+    let Ok(factory) = factory.cast::<IDXGIFactory5>() else { return false };
+    let mut allowed = windows::core::BOOL(0);
+    // SAFETY: a BOOL-sized answer for this feature.
+    let asked = unsafe {
+        factory.CheckFeatureSupport(
+            DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+            (&raw mut allowed).cast(),
+            size_of_val(&allowed) as u32,
+        )
+    };
+    asked.is_ok() && allowed.as_bool()
+}
+
+/// The swap chain's flags for [`tearing`].
+fn chain_flags(tearing: bool) -> DXGI_SWAP_CHAIN_FLAG {
+    if tearing { DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING } else { DXGI_SWAP_CHAIN_FLAG(0) }
 }
 
 /// The frame rate, shown in the window's caption every second and logged
@@ -10880,6 +10942,32 @@ impl Meter {
                     "texture refreshes per frame, all threads: {all:.1} ms, of them {own:.1} ms waiting for a texture another thread \
                      is refreshing, {asking:.1} ms asking the write watch and the guards, {still:.1} ms waiting for title memory to \
                      hold still (the runtime remapping it); the rest is reading, hashing and detiling"
+                );
+            }
+            let [cpu_us, cpu_bytes, cpu_textures] =
+                [0, 1, 2].map(|i| crate::texture::DETILED[i].swap(0, Ordering::Relaxed) as f64 / frames);
+            let [card_textures, card_dispatches, card_bytes, card_us, card_made, card_refused] =
+                std::array::from_fn::<f64, 6, _>(|i| crate::gpudetile::STATS[i].swap(0, Ordering::Relaxed) as f64 / frames);
+            let modes: Vec<String> = crate::texture::BY_MODE
+                .iter()
+                .enumerate()
+                .filter_map(|(mode, bytes)| {
+                    let mb = bytes.swap(0, Ordering::Relaxed) as f64 / frames / 1e6;
+                    (mb >= 0.05).then(|| format!("{} {mb:.1}", victory_formats::texture::Swizzle(mode as u32).name()))
+                })
+                .collect();
+            if cpu_bytes + card_bytes > 0.0 {
+                tracing::info!(
+                    "texture detiling per frame: on the PC {:.2} ms for {:.1} MB ({cpu_textures:.1} textures); on the card \
+                     (VICTORY_GPU_DETILE={}) {card_textures:.1} textures in {card_dispatches:.0} dispatches, the PC copying \
+                     {:.1} MB as laid out in {:.2} ms, {card_made:.1} stagings made for the card, {card_refused:.1} refused; \
+                     MB by swizzle mode: {}",
+                    cpu_us / 1e3,
+                    cpu_bytes / 1e6,
+                    std::env::var("VICTORY_GPU_DETILE").unwrap_or_else(|_| "0".into()),
+                    card_bytes / 1e6,
+                    card_us / 1e3,
+                    modes.join(", ")
                 );
             }
             let [through, left, filled, short] =
@@ -11457,7 +11545,7 @@ impl Host {
             // SAFETY: no back buffer is held; every submission was waited for.
             let resized = unsafe {
                 p.swap_chain
-                    .ResizeBuffers(BUFFERS, width, height, format, DXGI_SWAP_CHAIN_FLAG(0))
+                    .ResizeBuffers(BUFFERS, width, height, format, chain_flags(p.tearing))
             };
             match resized {
                 Ok(()) => {
@@ -11702,7 +11790,17 @@ impl Host {
                 },
             );
             let called = crate::streamline::present_called(&presenting);
-            let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
+            let shown = p.swap_chain.Present(0, if p.presents_tearing { DXGI_PRESENT_ALLOW_TEARING } else { DXGI_PRESENT(0) });
+            if shown.is_err() && p.presents_tearing {
+                // A white window on an RTX 5070 at 1440p (2026-11-28): presents that may tear
+                // were not shown. The rest of the run presents at the next refresh.
+                tracing::warn!(code = %shown, frame, "a present shown at once was refused; presenting at the next refresh for the rest of the run");
+                p.presents_tearing = false;
+                let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
+            } else if shown.is_err() && !p.present_refused {
+                p.present_refused = true;
+                tracing::warn!(code = %shown, frame, "a present was refused (logged once)");
+            }
             crate::streamline::present_returned(called);
             crate::streamline::present_ends(presenting);
             showing.next("the frame meter");
@@ -11740,6 +11838,8 @@ impl Host {
         // SAFETY: plain object creation for our window.
         unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
+            let tearing = tearing(&factory);
+            tracing::info!(tearing, "swap chain: frames shown as soon as presented (VICTORY_TEARING=1)");
             let desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: width,
                 Height: height,
@@ -11751,6 +11851,7 @@ impl Host {
                 BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 BufferCount: BUFFERS,
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                Flags: chain_flags(tearing).0 as u32,
                 ..Default::default()
             };
             // FSR 3 frame generation (where DLSS Frame Generation does not
@@ -11802,6 +11903,9 @@ impl Host {
                 badge: panel::Badge::new(),
                 notice: panel::Notice::new(),
                 menu: menu::Menu::new(),
+                tearing,
+                presents_tearing: tearing,
+                present_refused: false,
             })
         }
     }

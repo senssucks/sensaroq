@@ -86,6 +86,8 @@ fn build() -> [u8; 32] {
             "VICTORY_WATER_TILE_SLOTS",
             "VICTORY_WAVE_LOOP_SKIPS",
             "VICTORY_WATER_PORTALS_WIDE",
+            "VICTORY_LOOPS_WAVE",
+            "VICTORY_LDS_FIRST_INIT",
             "VICTORY_DEFRAG_HALF_MEETS",
             "VICTORY_ATOMIC_SUB_LOOP",
             "VICTORY_COLLECT_LOCAL",

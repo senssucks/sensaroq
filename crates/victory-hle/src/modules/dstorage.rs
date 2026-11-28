@@ -725,15 +725,36 @@ fn scheduler() -> Option<&'static Scheduler> {
         .as_ref()?;
     STARTED.call_once(|| {
         let workers = worker_count();
+        // Below normal priority (`VICTORY_DSTORAGE_PRIORITY=<-2..2>`; unset or
+        // 0, the default here: normal, as before). While a scene streams in all
+        // the workers unpack at once, and the threads a frame waits for stood
+        // "woken, not running yet" for 9.5 ms of each frame's chain (a crowded
+        // cutscene, 16 workers). Below them the workers take the processors
+        // nobody of the frame wants. Fleurrenza in trustno1-coder/VIctory-NVIDIA
+        // #39, from readmet3xt-lab/foxhound (-1 by default there): worst
+        // 5-second windows 134 -> 105 ms and 361 -> 98 ms. What it risks: streamed
+        // textures land later while the frame's threads keep every core busy.
+        let priority = std::env::var("VICTORY_DSTORAGE_PRIORITY")
+            .ok()
+            .and_then(|v| v.trim().parse::<i32>().ok())
+            .map_or(0, |p| p.clamp(-2, 2));
         let started = (0..workers)
             .filter(|i| {
                 std::thread::Builder::new()
                     .name(format!("dstorage {i}"))
-                    .spawn(|| work(scheduler))
+                    .spawn(move || {
+                        #[cfg(windows)]
+                        if priority != 0 {
+                            use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority};
+                            // SAFETY: this thread's own priority.
+                            unsafe { SetThreadPriority(GetCurrentThread(), priority) };
+                        }
+                        work(scheduler)
+                    })
                     .is_ok()
             })
             .count();
-        tracing::info!(workers = started, "dstorage: workers");
+        tracing::info!(workers = started, priority, "dstorage: workers (VICTORY_DSTORAGE_PRIORITY)");
     });
     Some(scheduler)
 }
