@@ -35,6 +35,7 @@ Each change is in sensaroq's history with the source commit or pull request it c
 
 | Source | What | Author |
 |---|---|---|
+| [PR #1234](https://github.com/fxceless/victory-fork/pull/1234) | A pipeline still being made is waited for in one frame only, not in every frame (`VICTORY_PIPELINE_WAIT_ONCE`, off by default here) | (fxceless; from powplusplus #867, BradRoland) |
 | [PR #501](https://github.com/fxceless/victory-fork/pull/501) | No blending on integer render targets | Yorivel |
 | [PR #683](https://github.com/fxceless/victory-fork/pull/683) | A loop limit for compute programs alone | Danigamer05 |
 | [#1379](https://github.com/fxceless/victory-fork/issues/1379) | The pipeline skip list as a set | the reporter of that issue |
