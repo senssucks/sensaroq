@@ -342,6 +342,14 @@ pub(crate) fn each_under(count: usize, f: &(dyn Fn(usize) + Sync)) {
     .each(count, f);
 }
 
+/// [`Pool::each`] on threads kept for the kernel's write-watch askings of a
+/// submission (`VICTORY_ASK_WIDE=<threads>`, with this one; see
+/// [`crate::watch::ask_wide`]).
+pub(crate) fn each_ask(count: usize, f: &(dyn Fn(usize) + Sync)) {
+    static POOL: OnceLock<&'static Pool> = OnceLock::new();
+    POOL.get_or_init(|| Pool::new("victory-ask-wide", crate::watch::ask_wide().clamp(1, 16))).each(count, f);
+}
+
 /// Calls `f` with every number below `count`, on this thread and on threads
 /// kept for making descriptors (`VICTORY_VIEW_THREADS`, 4 with this one, 6 for records; 1:
 /// on this one alone). Those for `records`, the heaps' records copied as

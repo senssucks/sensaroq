@@ -406,20 +406,34 @@ pub(crate) fn ask_ahead(ranges: impl Iterator<Item = (usize, usize)>) {
     pieces.sort_unstable();
     let _all = Asking::hold_all();
     let (mut asked, mut written) = (Vec::new(), Vec::new());
-    let mut i = 0;
-    while i < pieces.len() {
-        let first = pieces[i].0;
-        let mut last = pieces[i].1;
-        let mut k = i + 1;
-        while k < pieces.len()
-            && pieces[k].0 <= last + AHEAD_GAP
-            && last.max(pieces[k].1) - first <= AHEAD_MAX
-        {
-            last = last.max(pieces[k].1);
-            k += 1;
+    let runs = runs_of(&pieces);
+    if ask_wide() > 1 && runs.len() > 1 {
+        // Runs are mostly apart (more than `AHEAD_GAP` between them); one
+        // cut at `AHEAD_MAX` may share pages with the next. Runs that share
+        // pages are asked one after another, in order, as before; no two
+        // askings side by side reset the same page.
+        let spans: Vec<(usize, usize)> = runs
+            .iter()
+            .map(|r| (pieces[r.start].0, pieces[r.clone()].iter().map(|p| p.1).max().unwrap_or(pieces[r.start].0)))
+            .collect();
+        let groups = sharing_groups(&spans);
+        let found: Vec<std::sync::OnceLock<(Vec<(usize, usize)>, Vec<(usize, u16)>)>> =
+            groups.iter().map(|_| Default::default()).collect();
+        crate::land::each_ask(groups.len(), &|n| {
+            let (mut a, mut w) = (Vec::new(), Vec::new());
+            for &r in &groups[n] {
+                ask_run(&pieces[runs[r].clone()], &mut a, &mut w);
+            }
+            let _ = found[n].set((a, w));
+        });
+        for (a, w) in found.into_iter().filter_map(std::sync::OnceLock::into_inner) {
+            asked.extend(a);
+            written.extend(w);
         }
-        ask_run(&pieces[i..k], &mut asked, &mut written);
-        i = k;
+    } else {
+        for run in runs {
+            ask_run(&pieces[run], &mut asked, &mut written);
+        }
     }
     note_hot(&written);
     let mut j = journal_mut();
@@ -733,16 +747,56 @@ fn ask_rest(ranges: &[(usize, usize)]) {
     // askings a frame with the switch on, as without it). They are asked
     // here, once; what is not write-watched stays with `writes`.
     let mut written = Vec::new();
-    for &(start, end) in ranges {
-        if start >= end || published(start, end) {
-            continue;
+    if ask_wide() > 1 {
+        let left: Vec<(usize, usize)> = ranges
+            .iter()
+            .filter(|&&(start, end)| start < end && !published(start, end))
+            .map(|&(start, end)| (start / PAGE, end.div_ceil(PAGE)))
+            .filter(|&(first, last)| !ahead.holds(first, last))
+            .collect();
+        // Ranges that share pages are asked one after another, in their
+        // order, as below (the second is then held, or asked for what the
+        // first did not reset); groups that share none, side by side.
+        let groups = sharing_groups(&left);
+        let found: Vec<std::sync::OnceLock<(Vec<(usize, usize)>, Vec<(usize, u16)>)>> =
+            groups.iter().map(|_| Default::default()).collect();
+        let each = |n: usize| {
+            let (mut mine, mut asked, mut pages) = (Ahead::new(), Vec::new(), Vec::new());
+            for &i in &groups[n] {
+                let (first, last) = left[i];
+                if !mine.holds(first, last)
+                    && let Some(p) = kernel_written(first, last)
+                {
+                    pages.extend(p);
+                    mine.push((first, last));
+                    asked.push((first, last));
+                }
+            }
+            let _ = found[n].set((asked, pages));
+        };
+        if groups.len() > 1 {
+            crate::land::each_ask(groups.len(), &each);
+        } else {
+            (0..groups.len()).for_each(each);
         }
-        let (first, last) = (start / PAGE, end.div_ceil(PAGE));
-        if !ahead.holds(first, last)
-            && let Some(pages) = kernel_written(first, last)
-        {
+        for (asked, pages) in found.into_iter().filter_map(std::sync::OnceLock::into_inner) {
             written.extend(pages);
-            ahead.push((first, last));
+            for range in asked {
+                ahead.push(range);
+            }
+        }
+    } else {
+        for &(start, end) in ranges {
+            if start >= end || published(start, end) {
+                continue;
+            }
+            let (first, last) = (start / PAGE, end.div_ceil(PAGE));
+            if !ahead.holds(first, last)
+                && let Some(pages) = kernel_written(first, last)
+            {
+                written.extend(pages);
+                ahead.push((first, last));
+            }
         }
     }
     note_hot(&written);
@@ -800,6 +854,162 @@ fn elsewhere(at: usize, len: usize) -> Vec<(usize, Vec<usize>)> {
         return Vec::new();
     }
     crate::inplace::shown_elsewhere(at / BLOCK * BLOCK, at.saturating_add(len))
+}
+
+/// The runs of sorted `pieces` that [`ask_ahead`] asks about together, as
+/// index ranges: pieces closer than [`AHEAD_GAP`], at most [`AHEAD_MAX`]
+/// pages from the run's first. Runs share no pages.
+fn runs_of(pieces: &[(usize, usize)]) -> Vec<std::ops::Range<usize>> {
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < pieces.len() {
+        let first = pieces[i].0;
+        let mut last = pieces[i].1;
+        let mut k = i + 1;
+        while k < pieces.len()
+            && pieces[k].0 <= last + AHEAD_GAP
+            && last.max(pieces[k].1) - first <= AHEAD_MAX
+        {
+            last = last.max(pieces[k].1);
+            k += 1;
+        }
+        runs.push(i..k);
+        i = k;
+    }
+    runs
+}
+
+/// `ranges` (page ranges, in any order) in groups that share no pages with
+/// one another: ranges that overlap, directly or through others, are one
+/// group, in their order in `ranges`. Each is given by its index.
+fn sharing_groups(ranges: &[(usize, usize)]) -> Vec<Vec<usize>> {
+    let mut by_start: Vec<usize> = (0..ranges.len()).collect();
+    by_start.sort_unstable_by_key(|&i| ranges[i]);
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut reach = 0;
+    for i in by_start {
+        let (first, last) = ranges[i];
+        match groups.last_mut() {
+            Some(group) if first < reach => {
+                group.push(i);
+                reach = reach.max(last);
+            }
+            _ => {
+                groups.push(vec![i]);
+                reach = last;
+            }
+        }
+    }
+    for group in &mut groups {
+        group.sort_unstable();
+    }
+    groups
+}
+
+#[cfg(test)]
+mod wide_tests {
+    use super::{AHEAD_GAP, AHEAD_MAX, runs_of, sharing_groups};
+
+    fn random(seed: &mut u64) -> usize {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        *seed as usize
+    }
+
+    /// The runs asked side by side share no pages, and hold every piece.
+    #[test]
+    fn runs_share_no_pages() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..200 {
+            let mut pieces: Vec<(usize, usize)> = (0..random(&mut seed) % 300)
+                .map(|_| {
+                    let a = random(&mut seed) % (AHEAD_MAX * 3);
+                    (a, a + 1 + random(&mut seed) % (AHEAD_GAP * 2))
+                })
+                .collect();
+            pieces.sort_unstable();
+            let runs = runs_of(&pieces);
+            assert_eq!(runs.iter().map(|r| r.len()).sum::<usize>(), pieces.len());
+            let mut next = 0;
+            let mut reach = None;
+            for run in &runs {
+                assert_eq!(run.start, next);
+                assert!(!run.is_empty());
+                next = run.end;
+                let first = pieces[run.start].0;
+                let last = pieces[run.clone()].iter().map(|p| p.1).max().unwrap();
+                if let Some(reach) = reach
+                    && first < reach
+                {
+                    // Only where the run before was cut at its most.
+                    let before = runs.iter().find(|r| r.end == run.start).unwrap();
+                    assert!(last.max(reach) - pieces[before.start].0 > AHEAD_MAX, "{first} inside a run ending {reach}");
+                }
+                reach = Some(reach.map_or(last, |r: usize| r.max(last)));
+            }
+        }
+        // A run cut at its most shares pages with the next: asked side by
+        // side, they would be one group.
+        let pieces = [(0, AHEAD_MAX - 1), (10, AHEAD_MAX + 5), (20, AHEAD_MAX + 6)];
+        let runs = runs_of(&pieces);
+        assert_eq!(runs, [0..1, 1..3]);
+        let spans: Vec<_> = runs.iter().map(|r| (pieces[r.start].0, pieces[r.clone()].iter().map(|p| p.1).max().unwrap())).collect();
+        assert_eq!(sharing_groups(&spans), [vec![0, 1]]);
+    }
+
+    /// Ranges in different groups share no page; each group is in the
+    /// ranges' order; every range is in one group.
+    #[test]
+    fn groups_share_no_pages() {
+        let mut seed = 0x2545_f491_4f6c_dd1d;
+        for _ in 0..500 {
+            let ranges: Vec<(usize, usize)> = (0..random(&mut seed) % 60)
+                .map(|_| {
+                    let a = random(&mut seed) % 1000;
+                    (a, a + 1 + random(&mut seed) % 40)
+                })
+                .collect();
+            let groups = sharing_groups(&ranges);
+            let mut all: Vec<usize> = groups.iter().flatten().copied().collect();
+            all.sort_unstable();
+            assert_eq!(all, (0..ranges.len()).collect::<Vec<_>>());
+            for group in &groups {
+                assert!(group.windows(2).all(|w| w[0] < w[1]));
+            }
+            for (g, a) in groups.iter().enumerate() {
+                for b in &groups[g + 1..] {
+                    for &i in a {
+                        for &j in b {
+                            let (x, y) = (ranges[i], ranges[j]);
+                            assert!(x.1 <= y.0 || y.1 <= x.0, "{x:?} and {y:?} share pages");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `VICTORY_ASK_WIDE=<threads>` (off by default; 0 or 1 is off): a
+/// submission's one asking ([`ask_ahead`] and [`ask_rest`]) is made by that
+/// many threads, this one with them, each asking the kernel about pages no
+/// other asks about. The asking is the kernel walking and resetting page
+/// tables, 4 to 5 ms a frame (session 32); whether the kernel lets several
+/// threads do that at once is what the switch finds out (the "write watch"
+/// share of the submitting thread's line, and the askings' microseconds).
+///
+/// What changes: the order the kernel is asked in; what is asked is the
+/// same, and each page is asked about by one asking as before.
+pub(crate) fn ask_wide() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        let n = std::env::var("VICTORY_ASK_WIDE").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0usize);
+        if n > 1 {
+            tracing::info!(threads = n, "VICTORY_ASK_WIDE: a submission's write-watch asking spread over threads");
+        }
+        n
+    })
 }
 
 /// One kernel asking for `pieces` (page ranges in order); by halves if it
