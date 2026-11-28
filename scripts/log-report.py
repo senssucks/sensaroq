@@ -34,7 +34,9 @@ KIND = re.compile(r"(\S+) ([\d.]+) ms in ([\d.]+)")
 BARRIERS = re.compile(r"waits for every earlier shader write, per frame: ([\d.]+) for the title's barrier groups, ([\d.]+) for its barriers on buffers;.*barrier experiment (\d+)")
 BY_WORK = re.compile(r"^\s*the card's time by what ran: ([\d.]+) ms a frame in ([\d.]+) submissions a frame: (.*)$")
 PRIVATE = re.compile(r"process memory: (\d+) MB in RAM \(working set\), (\d+) MB private")
-WINDOWS = re.compile(r"windows of title memory (\d+) with (\d+) MB")
+WINDOWS = re.compile(r"windows of title memory (\d+) with (\d+) MB.*?; (\d+) of them in the card's memory.*?card room for windows (\d+) MB")
+WINDOWS_OLD = re.compile(r"windows of title memory (\d+) with (\d+) MB")
+CARD_USE = re.compile(r"the card's own: budget (\d+) MB, in use (\d+) MB.*?the PC's shared with the card: budget \d+ MB, in use (\d+) MB")
 TURN = re.compile(r"the card is kept awake, by turns.*\bon=(true|false)")
 
 # Programs named in the fork notes, so that the heaviest commands read by name.
@@ -92,6 +94,7 @@ class Run:
         self.by_work = defaultdict(lambda: [0.0, 0])
         self.private = []
         self.windows = []
+        self.card_use = []
         self.switches = ""
         self.turn = None  # VICTORY_CARD_AWAKE=turns: whether the kernel runs now
         self.turned = []  # (fps, draws, on) of frame lines after the first turn
@@ -138,7 +141,11 @@ class Run:
         elif (m := PRIVATE.search(msg)):
             self.private.append(int(m[2]))
         elif (m := WINDOWS.search(msg)):
-            self.windows.append((int(m[1]), int(m[2])))
+            self.windows.append((int(m[1]), int(m[2]), int(m[3]), int(m[4])))
+        elif (m := WINDOWS_OLD.search(msg)):
+            self.windows.append((int(m[1]), int(m[2]), None, None))
+        elif (m := CARD_USE.search(msg)):
+            self.card_use.append((int(m[1]), int(m[2]), int(m[3])))
 
     def gameplay(self):
         """Frame lines once the world is up: from the first over 1,500 draws."""
@@ -203,8 +210,16 @@ def report(run):
     if run.submit:
         print(f"   submitting thread {med(run.submit):.1f} ms a frame in its submissions, {med(run.after):.1f} after the sending")
     if run.private:
-        w = f", windows {run.windows[-1][0]} with {run.windows[-1][1]} MB" if run.windows else ""
+        w = ""
+        if run.windows:
+            n, mb, carded, card_mb = run.windows[-1]
+            w = f", windows {n} with {mb} MB"
+            if carded is not None:
+                w += f" ({carded} of them, {card_mb} MB, in the card's memory; about {max(mb - card_mb, 0)} MB left in the PC's memory, read over the bus)"
         print(f"   private memory {run.private[0]} -> {run.private[-1]} MB (max {max(run.private)}){w}")
+    if run.card_use:
+        budget, used, shared = run.card_use[-1]
+        print(f"   card memory at the last look: {used} of {budget} MB in use ({100 * used // max(budget, 1)}%), {shared} MB of the PC's shared with it")
     if run.barriers:
         groups = med([b[0] for b in run.barriers])
         buffers = med([b[1] for b in run.barriers])
