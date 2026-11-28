@@ -1925,6 +1925,81 @@ fn record_plane_pass(
 /// copy states: whole textures of one size in one format family, which the
 /// host copies as they are; or, for the twin of a stencil plane, that plane
 /// alone, through the twin's buffer.
+/// A list's prelude, decided ([`HostList::prelude_plan`]) and not yet recorded.
+struct PreludePlan {
+    aliasing: Vec<D3D12_RESOURCE_BARRIER>,
+    to_copy: Vec<D3D12_RESOURCE_BARRIER>,
+    syncs: Vec<(std::sync::Arc<crate::resource::HostTexture>, std::sync::Arc<crate::resource::Twin>, bool)>,
+    uploads: Vec<crate::texture::PreludeUpload>,
+    barriers: Vec<D3D12_RESOURCE_BARRIER>,
+}
+
+// SAFETY: D3D12 objects (free-threaded) named by barriers and textures; a
+// plan is recorded once, by one thread.
+unsafe impl Send for PreludePlan {}
+unsafe impl Sync for PreludePlan {}
+
+/// Whether a submission's list preludes are decided list by list on the
+/// submitting thread and recorded together on several threads
+/// (`VICTORY_PRELUDE_WIDE=1`, off by default: each recorded as it is
+/// decided). "Preludes and gathering the lists" was 6-20 ms a frame of the
+/// submitting thread in sessions 29-32.
+fn prelude_wide() -> bool {
+    crate::asked_for!("VICTORY_PRELUDE_WIDE")
+}
+
+/// Records `plans` (each with its list), each on whichever thread is free;
+/// their lists in the same order.
+fn record_preludes(plans: &[(&HostList, PreludePlan)]) -> Vec<Option<ID3D12CommandList>> {
+    struct Out(Vec<std::sync::Mutex<Option<ID3D12CommandList>>>);
+    // SAFETY: command lists, each written once by one thread and read after.
+    unsafe impl Sync for Out {}
+    struct Lists<'a>(&'a [(&'a HostList, PreludePlan)]);
+    // SAFETY: each list's prelude is recorded by one thread alone; the host
+    // lists are not otherwise used until this returns.
+    unsafe impl Sync for Lists<'_> {}
+    impl Lists<'_> {
+        fn record(&self, i: usize, out: &Out) {
+            let (list, plan) = &self.0[i];
+            *out.0[i].lock().unwrap_or_else(|e| e.into_inner()) = list.record_prelude(plan);
+        }
+    }
+    let out = Out((0..plans.len()).map(|_| std::sync::Mutex::new(None)).collect());
+    let lists = Lists(plans);
+    let (lists, out_ref) = (&lists, &out);
+    let one = |i: usize| lists.record(i, out_ref);
+    // A list named twice in a submission has one prelude list: those are
+    // recorded one after the other, in order, as before.
+    let twice = named_twice(plans.iter().map(|(list, _)| std::ptr::from_ref::<HostList>(list) as usize));
+    if plans.len() < 4 || twice {
+        (0..plans.len()).for_each(one);
+    } else {
+        crate::land::each_under(plans.len(), &one);
+    }
+    out.0.into_iter().map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner())).collect()
+}
+
+/// Whether any of `items` comes more than once.
+fn named_twice(items: impl Iterator<Item = usize>) -> bool {
+    let mut seen: Vec<usize> = items.collect();
+    let n = seen.len();
+    seen.sort_unstable();
+    seen.dedup();
+    seen.len() != n
+}
+
+#[cfg(test)]
+mod prelude_wide_tests {
+    use super::named_twice;
+
+    #[test]
+    fn a_list_named_twice_is_found() {
+        assert!(!named_twice([].into_iter()));
+        assert!(!named_twice([1, 2, 3].into_iter()));
+        assert!(named_twice([3, 1, 2, 1].into_iter()));
+    }
+}
+
 fn record_twin_copy(
     list: &ID3D12GraphicsCommandList,
     depth: &ID3D12Resource,
@@ -6458,16 +6533,32 @@ impl Host {
             batch.refresh_ahead(runs, |list, i| own.as_ref().is_some_and(|own| own.takes(list, i)));
         }
         stage.next("submit: the lists' steps");
+        let wide_preludes = prelude_wide();
+        let mut plans: Vec<(&HostList, PreludePlan)> = Vec::new();
+        let mut places: Vec<usize> = Vec::new();
         for list in runs {
             list.run_deferred(&mut batch, &air, |i| own.as_ref().is_some_and(|own| own.takes(list, i)));
             let preluding = std::time::Instant::now();
             firsts.push(lists.len());
             // (None unless `VICTORY_PRELUDE_UPLOADS=1`.)
             let uploads = list.prelude_uploads(&mut batch);
-            if let Some(prelude) = list.prelude(&uploads) {
+            if wide_preludes {
+                if let Some(plan) = list.prelude_plan(&uploads) {
+                    places.push(lists.len());
+                    lists.push(None);
+                    plans.push((list, plan));
+                }
+            } else if let Some(prelude) = list.prelude(&uploads) {
                 lists.push(Some(prelude));
             }
             lists.push(list.list.cast().ok());
+            OTHER_STEPS[3].fetch_add(preluding.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        if !plans.is_empty() {
+            let preluding = std::time::Instant::now();
+            for (at, recorded) in places.into_iter().zip(record_preludes(&plans)) {
+                lists[at] = recorded;
+            }
             OTHER_STEPS[3].fetch_add(preluding.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
         batch.fill();
@@ -7630,6 +7721,14 @@ impl HostList {
     /// here, right before the list runs (Belobug/VIctory-Belobug-AMD
     /// 5d6bd84).
     fn prelude(&self, uploads: &[(crate::texture::PreludeUpload, bool)]) -> Option<ID3D12CommandList> {
+        let plan = self.prelude_plan(uploads)?;
+        self.record_prelude(&plan)
+    }
+
+    /// What [`HostList::prelude`] records, decided: the part that must go
+    /// list by list in their order (each list's textures start in the
+    /// states the one before left them in). `None`: nothing to record.
+    fn prelude_plan(&self, uploads: &[(crate::texture::PreludeUpload, bool)]) -> Option<PreludePlan> {
         const COPY_DEST: u32 = 0x400;
         const COPY_SOURCE: u32 = 0x800;
         let host_state = |state: u32| D3D12_RESOURCE_STATES(state as i32);
@@ -7725,6 +7824,20 @@ impl HostList {
         if barriers.is_empty() && syncs.is_empty() && uploads.is_empty() {
             return None;
         }
+        Some(PreludePlan {
+            aliasing,
+            to_copy,
+            syncs,
+            uploads: uploads.iter().map(|(u, _)| u.clone()).collect(),
+            barriers,
+        })
+    }
+
+    /// Records `plan` into the list's prelude: the D3D12 calls, which touch
+    /// only this list's own prelude list and may run on any thread
+    /// ([`prelude_wide`]).
+    fn record_prelude(&self, plan: &PreludePlan) -> Option<ID3D12CommandList> {
+        let PreludePlan { aliasing, to_copy, syncs, uploads, barriers } = plan;
         let Some((allocator, list)) = self
             .prelude
             .get_or_init(|| host().and_then(|h| h.make_prelude()))
@@ -7738,19 +7851,19 @@ impl HostList {
             allocator.Reset().and_then(|()| {
                 list.Reset(allocator, None)?;
                 if !aliasing.is_empty() {
-                    list.ResourceBarrier(&aliasing);
+                    list.ResourceBarrier(aliasing);
                 }
                 if !to_copy.is_empty() {
-                    list.ResourceBarrier(&to_copy);
+                    list.ResourceBarrier(to_copy);
                 }
-                for (depth, twin, colour) in &syncs {
+                for (depth, twin, colour) in syncs {
                     record_twin_copy(list, &depth.texture, twin, *colour);
                 }
-                for (upload, _) in uploads {
+                for upload in uploads {
                     upload.record(list);
                 }
                 if !barriers.is_empty() {
-                    list.ResourceBarrier(&barriers);
+                    list.ResourceBarrier(barriers);
                 }
                 list.Close()
             })
