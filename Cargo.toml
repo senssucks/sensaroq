@@ -72,6 +72,16 @@ opt-level = 2
 [profile.release]
 debug = "line-tables-only"
 
+# Opt-in faster release build (trustno1-coder/VIctory-NVIDIA #537 by hqjake,
+# its profile half): cross-crate inlining over the hot command-list code.
+# `cargo build --profile fast -p victory` (output in target/fast). Slower
+# to build. Not panic = "abort": land, aside and thin catch panics. For a
+# Zen 3 or newer CPU, RUSTFLAGS="-C target-cpu=x86-64-v3" adds AVX2/BMI/FMA.
+[profile.fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+
 # The development build: release code generation plus the `diagnostics`
 # feature (`cargo build --profile diag -p victory --features diagnostics`),
 # kept in its own folder so it does not evict the plain release build.

@@ -752,6 +752,51 @@ fn lane_uniform(
     same
 }
 
+/// With each host wave a wave of its own ([`with_local_waves`]), a program whose own LDS
+/// leaves no room for the translation's dwords (`CS_CollectTriangles_Meshlets`: all 32 KiB):
+/// its host waves exchange nothing, and in a one-dimensional group each host wave is a
+/// 32-aligned run of flat ids on the hosts of 32-lane waves, so neither the exchange dwords
+/// nor `wave_base`'s counter is made. (A two- or three-dimensional group keeps them: a host
+/// may give its waves other runs, #1243.)
+fn tight_lds(cs: &crate::native::ComputeIo, own: u32) -> bool {
+    collect_local_on()
+        && LOCAL_WAVES.get()
+        && cs.threads[1] == 1
+        && cs.threads[2] == 1
+        && own + 2 * cs.threads[0].div_ceil(64) + 1 > HOST_LDS_DWORDS
+}
+
+/// The reduction an LDS atomic applies to its counter (with or without the old value
+/// returned), for [`wave_local`]'s reservations: `None` for any other DS instruction.
+fn lds_atomic(name: &str) -> Option<super::wave::Op> {
+    use super::wave::Op;
+    if !collect_local_on() {
+        return None;
+    }
+    let base = name.strip_prefix("ds_")?.replace("_rtn", "");
+    Some(match base.as_str() {
+        "add_u32" => Op::AddU,
+        "min_u32" => Op::MinU,
+        "max_u32" => Op::MaxU,
+        "min_i32" => Op::MinI,
+        "max_i32" => Op::MaxI,
+        "or_b32" => Op::Or,
+        "and_b32" => Op::And,
+        "xor_b32" => Op::Xor,
+        _ => return None,
+    })
+}
+
+/// `VICTORY_COLLECT_LOCAL=1` (trustno1-coder/VIctory-NVIDIA #388, off by
+/// default): local waves take LDS-atomic reservations, keep a guarded write's
+/// value under its own guard, and make no exchange room past a full LDS, so
+/// `CS_CollectTriangles(_Meshlets)` (6832a9da15c2e584, 6b82bc7d22016cb5)
+/// translate on 32-lane hosts instead of being dropped. In the cache key.
+pub(crate) fn collect_local_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_COLLECT_LOCAL").is_some_and(|v| v == "1"))
+}
+
 /// What a register value holds, for [`wave_local`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Wave {
@@ -835,6 +880,9 @@ pub(super) fn wave_local(p: &Program, st: &Structured) -> Result<(), (usize, &'s
             Fields::Buffer { data, .. } if name.contains("_atomic_") || name.contains("_store_") => {
                 data.iter().copied().collect()
             }
+            // An LDS atomic's operand: a reservation on a counter the group shares (the
+            // address stays among what it reads, which must not depend on the wave).
+            Fields::Ds { data, gds: false, .. } if lds_atomic(name).is_some() => data.clone(),
             _ => Vec::new(),
         };
         let kinds: Vec<Wave> = ops.iter().map(|o| of(kind, val(o))).collect();
@@ -923,7 +971,7 @@ pub(super) fn wave_local(p: &Program, st: &Structured) -> Result<(), (usize, &'s
                 if *c == Wave::Base { Wave::Base } else { Wave::Prefix }
             }
             // the reservation: the first lane adds its wave's total to a shared counter
-            (_, [Wave::Total(op)]) if name.contains("_atomic_") => {
+            (_, [Wave::Total(op)]) if name.contains("_atomic_") || lds_atomic(name).is_some() => {
                 let want = match op {
                     Op::AddU => "buffer_atomic_add",
                     Op::MinU => "buffer_atomic_umin",
@@ -935,7 +983,11 @@ pub(super) fn wave_local(p: &Program, st: &Structured) -> Result<(), (usize, &'s
                     Op::Xor => "buffer_atomic_xor",
                     _ => "",
                 };
-                if name != want || !first_mask(firsts, inst.read(Reg::S(EXEC))) {
+                // (or the same operation on an LDS counter: the group's waves share it, so
+                // each host wave's first lane reserves its own wave's slots as the console's
+                // reserved the whole wave's, `CS_CollectTriangles_Meshlets`' `ds_add_rtn_u32`)
+                let lds = lds_atomic(name).is_some_and(|o| o == *op);
+                if (name != want && !lds) || !first_mask(firsts, inst.read(Reg::S(EXEC))) {
                     return Err(TOTAL);
                 }
                 reserved = true;
@@ -947,7 +999,9 @@ pub(super) fn wave_local(p: &Program, st: &Structured) -> Result<(), (usize, &'s
     };
     let sections: Vec<_> = (0..p.blocks.len()).map(|b| super::wave::sections(p, b)).collect();
     let order = crate::ir::reverse_postorder(&p.blocks);
-    let pass = |kind: &mut HashMap<Value, Wave>, firsts: &mut HashSet<Value>, check: bool| -> Result<(), (usize, Why)> {
+    // guarded writes over a wave-dependent value: the block and guard they were written under
+    type Stale = HashMap<Value, (usize, crate::structure::Bool)>;
+    let pass = |kind: &mut HashMap<Value, Wave>, firsts: &mut HashSet<Value>, stale: &mut Stale, check: bool| -> Result<(), (usize, Why)> {
         for &b in &order {
             let block = &p.blocks[b];
             for phi in &block.phis {
@@ -994,7 +1048,21 @@ pub(super) fn wave_local(p: &Program, st: &Structured) -> Result<(), (usize, &'s
                 if name.starts_with("s_cbranch") {
                     continue; // with the block's exit, below
                 }
-                let (k, reserved) = match step(inst, kind, firsts) {
+                // Values `stale` under this very guard in this block: the lanes that run it
+                // are the ones that wrote them, so they read only the new value.
+                let guard = st.guards[b][i];
+                let fresh: Vec<(Value, Wave)> = match guard {
+                    Some(g) if collect_local_on() => inst
+                        .reads
+                        .iter()
+                        .filter(|&&(_, v)| stale.get(&v) == Some(&(b, g)))
+                        .filter_map(|&(_, v)| kind.remove(&v).map(|k| (v, k)))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let stepped = step(inst, kind, firsts);
+                kind.extend(fresh);
+                let (k, reserved) = match stepped {
                     Ok(r) => r,
                     Err(why) if check => return Err((inst.machine.offset, why)),
                     Err(_) => (Wave::Mixed, false),
@@ -1011,7 +1079,6 @@ pub(super) fn wave_local(p: &Program, st: &Structured) -> Result<(), (usize, &'s
                 if check && effect && !reserved && first_mask(firsts, inst.read(Reg::S(EXEC))) {
                     return Err((inst.machine.offset, EFFECT));
                 }
-                let guarded = st.guards[b][i].is_some();
                 for &(r, w) in &inst.writes {
                     let mut kw = match r {
                         // "some lane is counted" keeps the count's kind; any other SCC is one bit of data
@@ -1020,13 +1087,20 @@ pub(super) fn wave_local(p: &Program, st: &Structured) -> Result<(), (usize, &'s
                         }
                         _ => k,
                     };
-                    // a guarded write leaves the old value in the lanes outside EXEC
-                    if guarded
+                    // a guarded write leaves the old value in the lanes outside EXEC: the
+                    // value is mixed, but not to a later read under the same guard
+                    if let Some(g) = guard
                         && matches!(r, Reg::V(_))
                         && kw == Wave::Plain
-                        && matches!(of(kind, inst.read(r)), Wave::First | Wave::Total(_) | Wave::Prefix)
+                        && inst.read(r).is_some_and(|old| {
+                            stale.contains_key(&old)
+                                || matches!(of(kind, Some(old)), Wave::First | Wave::Total(_) | Wave::Prefix)
+                        })
                     {
                         kw = Wave::Mixed;
+                        if collect_local_on() {
+                            stale.insert(w, (b, g));
+                        }
                     }
                     put(kind, w, kw);
                 }
@@ -1050,12 +1124,13 @@ pub(super) fn wave_local(p: &Program, st: &Structured) -> Result<(), (usize, &'s
     };
     let mut kind: HashMap<Value, Wave> = HashMap::new();
     let mut firsts: HashSet<Value> = HashSet::new();
+    let mut stale: Stale = HashMap::new();
     // to a fixpoint (values carried around loops), then once more to say what is wrong
     let mut settled = false;
     for _ in 0..16 {
-        let before = (kind.clone(), firsts.len());
-        pass(&mut kind, &mut firsts, false)?;
-        if (&before.0, before.1) == (&kind, firsts.len()) {
+        let before = (kind.clone(), firsts.len(), stale.clone());
+        pass(&mut kind, &mut firsts, &mut stale, false)?;
+        if (&before.0, before.1, &before.2) == (&kind, firsts.len(), &stale) {
             settled = true;
             break;
         }
@@ -1063,7 +1138,7 @@ pub(super) fn wave_local(p: &Program, st: &Structured) -> Result<(), (usize, &'s
     if !settled {
         return Err((0, MIXED));
     }
-    pass(&mut kind, &mut firsts, true)
+    pass(&mut kind, &mut firsts, &mut stale, true)
 }
 
 /// The mode of a group barrier the translation adds (host waves meeting):
@@ -1778,6 +1853,32 @@ fn unsupported(offset: usize, what: Why) -> Stop {
     Stop::Fail(ShaderError::Unsupported { offset, what })
 }
 
+/// Where a program's constant table starts in its code: where its
+/// instructions end, unless a load at a fixed offset reads below that (then
+/// at `lowest`, the lowest offset any load or descriptor names). The
+/// program's constants follow its instructions, and a load at a computed
+/// offset reads them, not instruction bytes.
+/// `VICTORY_CODE_TABLE_TAIL=1`: [`code_table_start`] decides where the code
+/// table starts (off by default: at the lowest offset named, the whole
+/// program for a computed load). NVIDIA copies a table over 16 KiB into every
+/// thread's local memory (GBs of VRAM, Xid 13 on an RTX 5090). In the cache key.
+fn code_table_tail() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_CODE_TABLE_TAIL").is_some_and(|v| v == "1"))
+}
+
+pub(super) fn code_table_start(p: &crate::ir::Program, addresses: &[&crate::resource::Address], lowest: u32) -> u32 {
+    let code_end = p
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .map(|i| i.machine.offset + 4 * i.machine.words.len())
+        .max()
+        .unwrap_or(0) as u32;
+    let fixed_below = addresses.iter().any(|a| a.dynamic.is_none() && a.offset < code_end);
+    if fixed_below { lowest } else { lowest.max(code_end & !3) }
+}
+
 impl<'a> Lower<'a> {
     fn new(x: &'a Parts<'a>, bad: &'a HashMap<Value, Why>) -> Self {
         let p = x.p;
@@ -1819,7 +1920,29 @@ impl<'a> Lower<'a> {
         let mut pairs: Option<u32> = None;
         let mut pair_waves = 0;
         // (and only around the LDS accesses whose order counts)
-        let lds_order = if PAIR_MEETINGS.get() { lds_order(p, x.st) } else { LdsOrder::default() };
+        // With local waves too, but only where the LDS accesses cannot be ordered without it
+        // (`CS_CollectTriangles(_Meshlets)`): the programs that translate without it keep
+        // their barriers as they were.
+        let local_order = || {
+            let StageIo::Cs(cs) = x.native.io else { return false };
+            let ds = |i: &Inst| {
+                matches!(i.fields, Fields::Ds { .. })
+                    && !(i.name().starts_with("ds_swizzle") || i.name().contains("permute"))
+            };
+            cs.lds_bytes() > 0
+                && cs.threads.iter().product::<u32>() > 32
+                && all_lane_blocks(x.st).is_some_and(|all| {
+                    let spread = p.blocks.iter().enumerate().any(|(b, blk)| {
+                        !all.get(b).copied().unwrap_or(false) && blk.insts.iter().any(ds)
+                    });
+                    spread && lds_meetings(p, x.st, &all, &HashSet::new()).is_none()
+                })
+        };
+        let lds_order = if PAIR_MEETINGS.get() || LOCAL_WAVES.get() && collect_local_on() && local_order() {
+            lds_order(p, x.st)
+        } else {
+            LdsOrder::default()
+        };
         if let StageIo::Cs(cs) = x.native.io {
             s.threads = Some(cs.threads);
             s.lds_dwords = cs.lds_bytes() / 4;
@@ -1904,7 +2027,11 @@ impl<'a> Lower<'a> {
                                 // lanes 32..63 are the other host wave: masks, lane reads and lane
                                 // numbers go through two exchange dwords past the program's LDS
                                 exchange = Some((s.lds_dwords, group <= 32, all));
-                                s.lds_dwords += 2 * group.div_ceil(64);
+                                // (each host wave on its own never exchanges: no room for it
+                                // where the program's own LDS fills the host's, [`tight_lds`])
+                                if !tight_lds(&cs, s.lds_dwords) {
+                                    s.lds_dwords += 2 * group.div_ceil(64);
+                                }
                             }
                         }
                     }
@@ -1950,8 +2077,12 @@ impl<'a> Lower<'a> {
             }
             if wave == 32 && x.native.wave64 {
                 // console threads go to host waves in the order the waves take them (`wave_base`)
-                halves = Some(s.lds_dwords);
-                s.lds_dwords += 1;
+                if tight_lds(&cs, s.lds_dwords) && exchange.is_some() {
+                    // the flat id's runs are the host waves' (`thread_id`): no counter
+                } else {
+                    halves = Some(s.lds_dwords);
+                    s.lds_dwords += 1;
+                }
                 if PAIR_MEETINGS.get() && group > 64 && group % 64 == 0 && (split_lds || exchange.is_some()) {
                     // a counter per console wave, then two exchange buffers of four dwords each
                     pairs = Some(s.lds_dwords);
@@ -2230,22 +2361,24 @@ impl<'a> Lower<'a> {
         let (g, base, len) = match self.code_table {
             Some(t) => t,
             None => {
-                let first = self
+                let addresses: Vec<&crate::resource::Address> = self
                     .x
                     .res
                     .scalar
                     .iter()
-                    .map(|s| s.1)
+                    .map(|s| &s.1)
                     .chain(self.x.res.descriptors.iter().flat_map(|d| {
                         d.source.leaves().into_iter().filter_map(|l| match l {
-                            Source::Built { address, .. } => Some(*address),
+                            Source::Built { address, .. } => Some(address),
                             _ => None,
                         })
                     }))
                     .filter(|a| a.param == CODE)
-                    .map(|a| a.offset & !3)
-                    .min()
-                    .ok_or("a code table")?;
+                    .collect();
+                let lowest = addresses.iter().map(|a| a.offset & !3).min().ok_or("a code table")?;
+                // `VICTORY_CODE_TABLE_TAIL=1` (trustno1-coder #550, off by
+                // default here): the table starts after the instructions.
+                let first = if code_table_tail() { code_table_start(self.x.p, &addresses, lowest) } else { lowest };
                 let code = &self.x.native.code;
                 let words: Vec<u32> = code
                     .get(first as usize..)

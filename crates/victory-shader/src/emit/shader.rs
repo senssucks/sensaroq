@@ -591,6 +591,11 @@ impl Shader {
         if !self.root_uavs.is_empty() && !self.pixel && !compute {
             self.flags |= flags::UAVS_EVERY_STAGE;
         }
+        // After the clean-up, which may be what leaves a value written as a
+        // negation: no feature comes or goes with the loops.
+        if super::atomic_sub_loops() {
+            self.m.atomic_subtracts();
+        }
         let mut resources = None;
         let mut bindings = Vec::new();
         let i32c = |s: &mut Self, v: u32| {

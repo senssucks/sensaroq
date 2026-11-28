@@ -86,6 +86,9 @@ fn build() -> [u8; 32] {
             "VICTORY_WAVE_LOOP_SKIPS",
             "VICTORY_WATER_PORTALS_WIDE",
             "VICTORY_DEFRAG_HALF_MEETS",
+            "VICTORY_ATOMIC_SUB_LOOP",
+            "VICTORY_COLLECT_LOCAL",
+            "VICTORY_CODE_TABLE_TAIL",
             "VICTORY_THREAD_TICKET",
         ] {
             bytes.extend_from_slice(name.as_bytes());
@@ -134,9 +137,38 @@ pub fn precompile(container: &[u8]) -> Result<bool, String> {
     Ok(MISSES.load(Ordering::Relaxed) == misses)
 }
 
+/// Tells the translator, once, whether atomic subtractions on group memory
+/// are written as compare-exchange loops
+/// ([`victory_shader::emit::atomic_sub_loops`]), and returns it. NVIDIA's
+/// compiler refuses such a pipeline as out of memory (compute
+/// 7f61193d2c0e5f22 on an RTX 5060 Ti). Off unless
+/// `VICTORY_ATOMIC_SUB_LOOP=1` (DexNom/VIctory #149). Called before anything
+/// is translated; the switch is in the cache key.
+pub fn host_settings() -> bool {
+    static SET: OnceLock<bool> = OnceLock::new();
+    *SET.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_ATOMIC_SUB_LOOP").is_some_and(|v| v == "1");
+        victory_shader::emit::set_atomic_sub_loops(on);
+        if on {
+            tracing::info!("VICTORY_ATOMIC_SUB_LOOP=1: atomic subtractions on group memory are compare-exchange loops");
+        }
+        on
+    })
+}
+
 /// The translation of a console shader container, from the cache when
 /// there is one.
 pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
+    host_settings();
+    if wide_only(container) {
+        let translate = |c: &[u8]| victory_shader::emit::with_wide(|| victory_shader::emit::translate(c)).map_err(|e| e.to_string());
+        // A build of its own for these too.
+        let build = *blake3::Hasher::new().update(&build()).update(b"VICTORY_WAVE_WIDE_ONLY").finalize().as_bytes();
+        return match CACHE.get() {
+            Some(cache) => cached(cache, &build, container, translate),
+            None => translate(container),
+        };
+    }
     if local_first(container) {
         let translate = |c: &[u8]| victory_shader::emit::with_local_first(|| victory_shader::emit::translate(c)).map_err(|e| e.to_string());
         // A build of its own for these, so that no other translation is
@@ -160,6 +192,27 @@ pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
 /// (`victory_shader::emit::with_local_first`). For the decal heap's defrag
 /// (02384a60fda6f2d0): the faces need it, and with the halves meeting by
 /// spinning it took about 12 ms of the card a frame.
+/// Whether `container` is one of the programs named by
+/// `VICTORY_WAVE_WIDE_ONLY` (comma-separated 16-digit hashes as the log
+/// names them; unset = none): taken wave-wide on a 32-lane host
+/// ([`victory_shader::emit::with_wide`]). After DoubleGhosty/cool_fox #94,
+/// where the water passes came back this way on an RTX 5080.
+pub(crate) fn wide_only(container: &[u8]) -> bool {
+    static HASHES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let hashes = HASHES.get_or_init(|| {
+        std::env::var("VICTORY_WAVE_WIDE_ONLY")
+            .unwrap_or_default()
+            .split(',')
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+            .collect()
+    });
+    !hashes.is_empty() && {
+        let hash = blake3::hash(container).to_hex();
+        hashes.iter().any(|h| h.as_str() == &hash[..16])
+    }
+}
+
 pub(crate) fn local_first(container: &[u8]) -> bool {
     static HASHES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     let hashes = HASHES.get_or_init(|| {

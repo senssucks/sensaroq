@@ -69,6 +69,9 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [PR #378](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/378) | Face relocation (decal defrag, 02384a60fda6f2d0): each console wave's two halves meet on their own, no group barrier (`VICTORY_DEFRAG_HALF_MEETS`, off by default here), from DoubleGhosty/cool_fox (Davidjc13) | liuhVIP |
 | [PR #77](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/77) | Audio DSP mono convolutions: TVs, phone calls and reverb heard (`VICTORY_DSP_CONVOLVE`, off by default here; `VICTORY_DSP_GAIN`), same as fxceless #1491 | Omnicrash |
 | [PR #63](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/63), [PR #393](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/393) | The sky's light in reflections bounded by the light around where the miss program has no depth (glossy eyes, glass and floors indoors; `VICTORY_AMBIENT_SPECULAR_ALPHA=bound`, `VICTORY_AMBIENT_SPECULAR_NO_DEPTH=1`, off by default here) | wasonidas, tippythetaidum |
+| [PR #388](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/388) | CS_CollectTriangles(_Meshlets) (6832a9da15c2e584, 6b82bc7d22016cb5) translate on 32-lane cards as local waves with LDS-atomic reservations, instead of being dropped (`VICTORY_COLLECT_LOCAL`, off by default here) | fromrivertothesea |
+| [PR #550](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/550) | The code constant table starts after the instructions, so NVIDIA keeps it in constant memory instead of every thread's local memory (`VICTORY_CODE_TABLE_TAIL`, off by default here); fix by desplmfao (Marvisak/VIctory #2143) | kibagami-nc |
+| [PR #537](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/537) | An opt-in `fast` build profile: thin LTO, one codegen unit (its release-profile half; not its panic = "abort") | hqjake |
 
 ### stellarr-studio/kelvaroq (native patches)
 
@@ -96,6 +99,8 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [DoubleGhosty/cool_fox PR #49](https://github.com/DoubleGhosty/cool_fox/pull/49) | Per-draw maps keyed by address use AddressHash, not SipHash | Esteban Viera |
 | [DoubleGhosty/cool_fox PR #18](https://github.com/DoubleGhosty/cool_fox/pull/18) | Idle times for staging and windows, the most a read buffer keeps (`VICTORY_STAGING_IDLE_MS`, `VICTORY_WINDOW_IDLE_MS`, `VICTORY_READ_KEEP_MB`; off by default) | Esteban Viera |
 | [DoubleGhosty/cool_fox PR #20](https://github.com/DoubleGhosty/cool_fox/pull/20) | The most spare scratch chunks and send buffers kept (`VICTORY_SCRATCH_SPARE_MB`, `VICTORY_SEND_SPARE_MB`; unset as before) | Esteban Viera |
+| [DexNom/VIctory PR #149](https://github.com/DexNom/VIctory/pull/149) | Atomic subtractions on group memory as compare-exchange loops, so NVIDIA makes the pipeline (weatherParticle CS_BeginUpdate, 7f61193d2c0e5f22, refused as out of memory; `VICTORY_ATOMIC_SUB_LOOP`, off by default here; also Marvisak/VIctory #3619) | notquiteog |
+| [DoubleGhosty/cool_fox issue #94](https://github.com/DoubleGhosty/cool_fox/issues/94) | Idea: named wave64 programs taken wave-wide on 32-lane cards, which brought the water passes back on an RTX 5080 (`VICTORY_WAVE_WIDE_ONLY`, written anew, unset = none) | cool_fox reporter |
 | [HumanlyDev/HUMAN PR #18](https://github.com/HumanlyDev/HUMAN/pull/18) | Dynamic descriptor slots as a bitset, searched 64 at a time (hand-ported) | HumanlyDev |
 
 The NVIDIA fork watch that finds these lives in the project notes. New ports are added here as they land.

@@ -520,6 +520,96 @@ impl Module {
         self.extract(block, r, 0)
     }
 
+    /// Whether `v` is written as the negation of a value: `0 - x`,
+    /// `x * -1` or `(x ^ -1) + 1`.
+    fn is_negation(&self, v: V) -> bool {
+        let V::Inst(i) = v else { return false };
+        let is = |v: V, k: i64| self.int_value(v) == Some(k);
+        match self.insts[i as usize].op {
+            Op::Bin(Bin::Sub, a, _) => is(a, 0),
+            Op::Bin(Bin::Mul, a, b) => is(a, -1) || is(b, -1),
+            Op::Bin(Bin::Add, a, b) => [(a, b), (b, a)].into_iter().any(|(n, one)| {
+                is(one, 1)
+                    && matches!(n, V::Inst(j) if matches!(
+                        self.insts[j as usize].op,
+                        Op::Bin(Bin::Xor, p, q) if is(p, -1) || is(q, -1)
+                    ))
+            }),
+            _ => false,
+        }
+    }
+
+    /// Every atomic subtraction (`atomicrmw sub`, and `atomicrmw add` of a
+    /// value written as a negation, [`Module::is_negation`]) becomes a
+    /// compare-exchange loop with the same result: the dword is read, and
+    /// exchanged for itself less the value until no other thread wrote it
+    /// in between; the old value returns. Returns how many were rewritten.
+    ///
+    /// NVIDIA's compiler refuses a compute pipeline with either form on
+    /// group-shared memory as out of memory (`E_OUTOFMEMORY`), whatever the
+    /// rest of the program: it takes an add of a negation, also written as
+    /// `x * -1` or `~x + 1`, for the subtraction it is. It makes pipelines
+    /// of an add of anything else (`x`, `5 - x`, `-x + 5`, `c ? -x : 0`, a
+    /// negative constant) and of this loop.
+    ///
+    /// The block of such an atomic ends before it and goes to the loop;
+    /// what followed it is a new block, which phis now name where they
+    /// named the old one.
+    pub(crate) fn atomic_subtracts(&mut self) -> usize {
+        let mut done = 0;
+        let mut b = 0;
+        while b < self.blocks.len() {
+            let found = self.blocks[b]
+                .body
+                .iter()
+                .position(|&i| match self.insts[i as usize].op {
+                    Op::AtomicRmw(Rmw::Sub, ..) => true,
+                    Op::AtomicRmw(Rmw::Add, _, v) => self.is_negation(v),
+                    _ => false,
+                });
+            let Some(at) = found else {
+                b += 1;
+                continue;
+            };
+            let i = self.blocks[b].body[at];
+            let Op::AtomicRmw(op, p, v) = self.insts[i as usize].op else {
+                unreachable!()
+            };
+            let ty = self.insts[i as usize].ty;
+            let (lp, tail) = (self.new_block(), self.new_block());
+            // What followed the atomic, and the block's way out.
+            let rest = self.blocks[b].body.split_off(at + 1);
+            self.blocks[b].body.pop();
+            self.blocks[tail].body = rest;
+            self.blocks[tail].term = self.blocks[b].term.take();
+            for inst in &mut self.insts {
+                if let Op::Phi(incoming) = &mut inst.op {
+                    for (_, from) in incoming {
+                        if *from == b {
+                            *from = tail;
+                        }
+                    }
+                }
+            }
+            let init = self.load(b, p);
+            self.terminate(b, Term::Br(lp));
+            // The atomic's own slot is the loop's phi, the old value: what
+            // read the atomic's result reads it.
+            self.blocks[lp].phis.push(i);
+            let old = V::Inst(i);
+            let bin = if op == Rmw::Sub { Bin::Sub } else { Bin::Add };
+            let new = self.push(lp, ty, Op::Bin(bin, old, v));
+            let prev = self.cmpxchg(lp, p, old, new);
+            let same = self.cmp(lp, pred::EQ, prev, old);
+            self.insts[i as usize].op = Op::Phi(vec![(init, b), (prev, lp)]);
+            self.terminate(lp, Term::CondBr(same, tail, lp));
+            done += 1;
+            // (The rest of the block is looked at as `tail`.)
+            b += 1;
+        }
+        done
+    }
+
     pub fn set_phi(&mut self, phi: V, incoming: Vec<(V, usize)>) {
         let V::Inst(i) = phi else { panic!() };
         self.insts[i as usize].op = Op::Phi(incoming);
@@ -1263,6 +1353,94 @@ mod tests {
             m.write()
         };
         assert_eq!(build(false), build(true));
+    }
+
+    #[test]
+    fn atomic_subtractions_become_loops() {
+        // entry: four atomics on one dword (an add of a negation, an add
+        // of the value itself, a subtraction, an add of `5 - x`), then a
+        // branch to `join`, whose phi names the entry.
+        let build = || {
+            let mut m = Module::default();
+            let i32t = m.int(32);
+            let void = m.void();
+            let fty = m.func_ty(i32t, vec![i32t]);
+            let f = m.function("dx.op.synthetic", fty, Some(Attr::NoUnwind), false);
+            let main_ty = m.func_ty(void, vec![]);
+            m.function("main", main_ty, None, true);
+            let arr = m.array(4, i32t);
+            let lds = m.global("lds", arr, 3);
+            let (entry, join) = (m.new_block(), m.new_block());
+            let (zero, one) = (m.i32(0), m.i32(1));
+            let x = m.call(entry, f, vec![one]);
+            let p = m.element(entry, lds, zero);
+            let neg = m.bin(entry, Bin::Sub, zero, x);
+            let a = m.atomic(entry, Rmw::Add, p, neg);
+            let b = m.atomic(entry, Rmw::Add, p, x);
+            let c = m.atomic(entry, Rmw::Sub, p, x);
+            let five = m.i32(5);
+            let rest = m.bin(entry, Bin::Sub, five, x);
+            let d = m.atomic(entry, Rmw::Add, p, rest);
+            m.terminate(entry, Term::Br(join));
+            let phi = m.phi(join, i32t);
+            m.set_phi(phi, vec![(a, entry)]);
+            for v in [phi, b, c, d] {
+                m.call(join, f, vec![v]);
+            }
+            m.terminate(join, Term::Ret);
+            (m, entry, join, [a, b, c, d], phi, (neg, x))
+        };
+        let (mut m, entry, join, [a, b, c, d], phi, _) = build();
+        let plain = m.write();
+        assert_eq!(m.atomic_subtracts(), 2);
+        let op = |m: &Module, v: V| match v {
+            V::Inst(i) => m.insts[i as usize].op.clone(),
+            _ => unreachable!(),
+        };
+        // The two subtractions are the old values of their loops; the adds
+        // of something else stay.
+        assert!(matches!(op(&m, a), Op::Phi(_)) && matches!(op(&m, c), Op::Phi(_)));
+        assert!(matches!(op(&m, b), Op::AtomicRmw(Rmw::Add, ..)));
+        assert!(matches!(op(&m, d), Op::AtomicRmw(Rmw::Add, ..)));
+        assert_eq!(m.blocks.len(), 6);
+        // Each loop goes round on itself and leaves to what followed.
+        let mut at = entry;
+        for _ in 0..2 {
+            let Some(Term::Br(lp)) = m.blocks[at].term else {
+                panic!("no loop")
+            };
+            let Some(Term::CondBr(_, tail, again)) = m.blocks[lp].term else {
+                panic!("no exit")
+            };
+            assert_eq!(again, lp);
+            assert!(
+                m.blocks[lp]
+                    .body
+                    .iter()
+                    .any(|&i| matches!(m.insts[i as usize].op, Op::CmpXchg(..)))
+            );
+            at = tail;
+        }
+        assert!(matches!(m.blocks[at].term, Some(Term::Br(j)) if j == join));
+        let Op::Phi(incoming) = op(&m, phi) else {
+            panic!()
+        };
+        assert_eq!(incoming, vec![(a, at)]);
+        assert_ne!(m.write(), plain);
+        // Nothing is left to do.
+        assert_eq!(m.atomic_subtracts(), 0);
+        // The other spellings of a negation.
+        let (mut m, entry, _, _, _, (neg, x)) = build();
+        let V::Inst(n) = neg else { unreachable!() };
+        assert!(m.is_negation(neg) && !m.is_negation(x));
+        let (ones, one) = (m.i32(u32::MAX), m.i32(1));
+        m.insts[n as usize].op = Op::Bin(Bin::Mul, x, ones);
+        assert!(m.is_negation(neg));
+        let not = m.bin(entry, Bin::Xor, ones, x);
+        m.insts[n as usize].op = Op::Bin(Bin::Add, one, not);
+        assert!(m.is_negation(neg));
+        m.insts[n as usize].op = Op::Bin(Bin::Add, x, not);
+        assert!(!m.is_negation(neg));
     }
 
     #[test]

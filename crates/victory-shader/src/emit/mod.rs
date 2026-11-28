@@ -131,6 +131,24 @@ pub use shader::{
     raw_views, set_raw_views, set_view_heap_limit, view_heap_limit,
 };
 
+static ATOMIC_SUB_LOOPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether atomic subtractions are written as compare-exchange loops (off
+/// until [`set_atomic_sub_loops`]): `atomicrmw sub`, and `atomicrmw add` of
+/// a value written as a negation (the console's `ds_sub_u32`, and
+/// `ds_add_u32` of a value the program negated). NVIDIA's compiler refuses
+/// the pipeline of a program with either on group-shared memory as out of
+/// memory. The setting is part of the translation, so the shader cache must
+/// key on it (`victory-gpu`'s does).
+pub fn atomic_sub_loops() -> bool {
+    ATOMIC_SUB_LOOPS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Sets [`atomic_sub_loops`] for the translations made from now on.
+pub fn set_atomic_sub_loops(on: bool) {
+    ATOMIC_SUB_LOOPS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The loop limit without an override: 2^20.
 pub const DEFAULT_LOOP_LIMIT: u32 = lower::LOOP_LIMIT;
 
@@ -343,6 +361,21 @@ thread_local! {
 thread_local! {
     /// See [`with_local_first`].
     static LOCAL_FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// See [`with_wide`].
+    static WIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with a console wave64 compute program on a 32-lane host taken
+/// wave-wide (its lane branches taken by both host waves, as
+/// `VICTORY_WAVE_WIDE=1` does for every program) unless `VICTORY_WAVE_WIDE`
+/// says otherwise. For programs named by the caller
+/// (`VICTORY_WAVE_WIDE_ONLY`, after DoubleGhosty/cool_fox #94: the water
+/// passes that otherwise do not translate on NVIDIA).
+pub fn with_wide<T>(f: impl FnOnce() -> T) -> T {
+    let before = WIDE.replace(true);
+    let out = f();
+    WIDE.set(before);
+    out
 }
 
 /// Runs `f` with a console wave64 compute program on a 32-lane host
@@ -811,7 +844,7 @@ pub fn emit(
                 && c.digest == [0x4f, 0xa5, 0x83, 0x20, 0xd7, 0x61, 0xbf, 0x55, 0x81, 0x20, 0xf9, 0x2c, 0x19, 0xd3, 0x84, 0xaa]
             || matches!(native.io, crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() == 128)
                 && c.digest == [0x50, 0xcf, 0x28, 0x32, 0x8b, 0x58, 0x05, 0x3d, 0xa8, 0x9a, 0x8d, 0xa0, 0x1a, 0xa1, 0x23, 0xc6];
-        let wide_on = wide_option.as_ref().map_or(scene_kernel, |v| v == "1");
+        let wide_on = wide_option.as_ref().map_or(scene_kernel || WIDE.get(), |v| v == "1");
         // CS_DefragHeap_ComputeRelocations: a group of two console waves. Its
         // divergent LDS is read and written in one region, so it only lowers
         // once that region is taken by both halves of a wave. With
@@ -2951,6 +2984,33 @@ mod tests {
                 out[0][6]
             );
         }
+    }
+
+    /// A program's constant table starts after its instructions, unless a
+    /// load at a fixed offset reads below that.
+    #[test]
+    fn the_code_table_starts_after_the_instructions() {
+        use super::lower::code_table_start;
+        use crate::{ir, resource};
+        // s_nop 0, s_endpgm, then 1,000 dwords of constants.
+        let mut words = vec![0xBF80_0000, 0xBF81_0000];
+        words.extend(0..1000u32);
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let p = ir::build(&code, false, 256).unwrap();
+        let at = |offset: u32, dynamic: bool| resource::Address {
+            param: resource::CODE,
+            offset,
+            dynamic: dynamic.then_some(ir::Value(0)),
+        };
+        let (computed, fixed_after, fixed_inside) = (at(0, true), at(12, false), at(4, false));
+        // A load at a computed offset from the code's start: the table is
+        // the constants only, not the whole program.
+        assert_eq!(code_table_start(&p, &[&computed], 0), 8);
+        assert_eq!(code_table_start(&p, &[&computed, &fixed_after], 0), 8);
+        // A load at a fixed offset inside the instructions keeps the start.
+        assert_eq!(code_table_start(&p, &[&computed, &fixed_inside], 0), 0);
+        // Loads past the instructions only: from the lowest of them.
+        assert_eq!(code_table_start(&p, &[&fixed_after], 12), 12);
     }
 }
 
