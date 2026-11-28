@@ -68,6 +68,7 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [PR #358](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/358) | Independent card maintenance jobs batched (`VICTORY_MAINTENANCE_BATCHES`, off by default) | krofty |
 | [PR #378](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/378) | Face relocation (decal defrag, 02384a60fda6f2d0): each console wave's two halves meet on their own, no group barrier (`VICTORY_DEFRAG_HALF_MEETS`, off by default here), from DoubleGhosty/cool_fox (Davidjc13) | liuhVIP |
 | [PR #77](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/77) | Audio DSP mono convolutions: TVs, phone calls and reverb heard (`VICTORY_DSP_CONVOLVE`, off by default here; `VICTORY_DSP_GAIN`), same as fxceless #1491 | Omnicrash |
+| [PR #63](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/63), [PR #393](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/393) | The sky's light in reflections bounded by the light around where the miss program has no depth (glossy eyes, glass and floors indoors; `VICTORY_AMBIENT_SPECULAR_ALPHA=bound`, `VICTORY_AMBIENT_SPECULAR_NO_DEPTH=1`, off by default here) | wasonidas, tippythetaidum |
 
 ### stellarr-studio/kelvaroq (native patches)
 
@@ -93,6 +94,8 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [TaynanGT/Vice-Tay PR #191](https://github.com/TaynanGT/Vice-Tay/pull/191) | AVX2/SSE2 micro-tile texture detiler and worker pool (1.6-4.6x on large textures) | Vladimir |
 | [DoubleGhosty/cool_fox PR #47](https://github.com/DoubleGhosty/cool_fox/pull/47) | Title memory reads zero only the bytes no run covers | Esteban Viera |
 | [DoubleGhosty/cool_fox PR #49](https://github.com/DoubleGhosty/cool_fox/pull/49) | Per-draw maps keyed by address use AddressHash, not SipHash | Esteban Viera |
+| [DoubleGhosty/cool_fox PR #18](https://github.com/DoubleGhosty/cool_fox/pull/18) | Idle times for staging and windows, the most a read buffer keeps (`VICTORY_STAGING_IDLE_MS`, `VICTORY_WINDOW_IDLE_MS`, `VICTORY_READ_KEEP_MB`; off by default) | Esteban Viera |
+| [DoubleGhosty/cool_fox PR #20](https://github.com/DoubleGhosty/cool_fox/pull/20) | The most spare scratch chunks and send buffers kept (`VICTORY_SCRATCH_SPARE_MB`, `VICTORY_SEND_SPARE_MB`; unset as before) | Esteban Viera |
 | [HumanlyDev/HUMAN PR #18](https://github.com/HumanlyDev/HUMAN/pull/18) | Dynamic descriptor slots as a bitset, searched 64 at a time (hand-ported) | HumanlyDev |
 
 The NVIDIA fork watch that finds these lives in the project notes. New ports are added here as they land.
