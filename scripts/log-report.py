@@ -46,6 +46,11 @@ NAMES = {
     "982f3cccd5c04294": "fog",
     "6d7fe7745ab9c6d8": "ray binning",
     "5cf00dc39042edaf": "shadow masks",
+    "14264103296aa43a": "probes: register allocation requests",
+    "4a1a6cda9de2974b": "probes: shade copy",
+    "3592426e3e9142d8": "probes: gather V-buffer",
+    "ce33eeaaf36bce05": "probes: gather copy",
+    "cfd83392ec9ae408": "probes: gather copy",
     "7f61193d2c0e5f22": "weather particles begin-update",
     "6b82bc7d22016cb5": "collect triangles (meshlets)",
     "6832a9da15c2e584": "collect triangles",
@@ -55,6 +60,16 @@ NAMES = {
 HEX = re.compile(r"\b[0-9a-f]{16}\b")
 
 BUCKETS = [(0, 2000), (2000, 4000), (4000, 6000), (6000, 8000), (8000, 10000), (10000, 10**9)]
+
+
+def group_name(text):
+    """A short name for a "by what ran" group: its list count, the known
+    programs in it by name, else its first pipeline."""
+    lists = re.match(r"\s*(\d+) lists", text)
+    pipes = re.findall(r"\[([^\]]*)\]", text)
+    named = sorted({NAMES[h] for p in pipes for h in HEX.findall(p) if h in NAMES})
+    head = ", ".join(named) if named else (pipes[0] if pipes else "no title pipelines (ours)")
+    return f"{lists[1] if lists else '?'} lists, {len(pipes)} pipelines: {head}"
 
 
 def bucket_name(b):
@@ -92,6 +107,7 @@ class Run:
         self.kind_lines = 0
         self.barriers = []  # (groups, buffers, experiment)
         self.by_work = defaultdict(lambda: [0.0, 0])
+        self.reports = 0  # copy-statistics reports (diag builds), each with its own "by what ran" lines
         self.private = []
         self.windows = []
         self.card_use = []
@@ -134,8 +150,10 @@ class Run:
                 self.kinds[k[1]][1] += float(k[3])
         elif (m := BARRIERS.search(msg)):
             self.barriers.append((float(m[1]), float(m[2]), int(m[3])))
+        elif msg.startswith("copies per frame:"):
+            self.reports += 1
         elif (m := BY_WORK.match(msg)):
-            w = self.by_work[m[3].strip()[:160]]
+            w = self.by_work[group_name(m[3])]
             w[0] += float(m[1])
             w[1] += 1
         elif (m := PRIVATE.search(msg)):
@@ -236,10 +254,14 @@ def report(run):
         for what, (ms, n, longest) in avg[:25]:
             print(f"     {ms:6.2f}  {n:6.1f}  {longest:6.2f}  {short(what)}")
     if run.by_work:
-        work = sorted(run.by_work.items(), key=lambda kv: -kv[1][0] / kv[1][1])
-        print("   waits for the card by what ran (ms a frame):")
-        for what, (ms, n) in work[:6]:
-            print(f"     {ms / n:6.1f}  {short(what)}")
+        # Each report lists its heaviest submissions only: averaged over all
+        # reports, so a group that is heavy now and then is not overstated.
+        reports = max(run.reports, max(n for _, n in run.by_work.values()))
+        work = sorted(run.by_work.items(), key=lambda kv: -kv[1][0])
+        total = sum(ms for ms, _ in run.by_work.values()) / reports
+        print(f"   the card's time by what ran, over {reports} reports: {total:.1f} ms a frame in the listed submissions; heaviest:")
+        for what, (ms, n) in work[:8]:
+            print(f"     {ms / reports:6.1f}  (in {n} reports)  {what}")
     print()
 
 
