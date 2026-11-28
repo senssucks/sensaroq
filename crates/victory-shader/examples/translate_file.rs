@@ -4,7 +4,9 @@
 //! view heap's null slot, 999999 on NVIDIA);
 //! `VICTORY_WAVE_WHY=1` says why each form of a wave64 program failed;
 //! `VICTORY_ATOMIC_SUB_LOOP=1` as the layer sets it; `VICTORY_DXIL_OUT=<dir>`
-//! writes each translation there (`<file name>.dxil`).
+//! writes each translation there (`<file name>.dxil`);
+//! `VICTORY_WAVE_WIDE_ONLY=<hash>[,..]` takes the files whose names hold a
+//! listed hash wave-wide, as the layer does by the container's hash.
 fn main() {
     if let Some(n) = std::env::var("VICTORY_HOST_WAVE").ok().and_then(|v| v.parse().ok()) {
         victory_shader::emit::set_host_max_wave(n);
@@ -24,7 +26,17 @@ fn main() {
                 continue;
             }
         };
-        match victory_shader::emit::translate(&bytes) {
+        let wide = std::env::var("VICTORY_WAVE_WIDE_ONLY")
+            .unwrap_or_default()
+            .split(',')
+            .map(|h| h.trim().to_ascii_lowercase())
+            .any(|h| h.len() == 16 && path.to_ascii_lowercase().contains(&h));
+        let made = if wide {
+            victory_shader::emit::with_wide(|| victory_shader::emit::translate(&bytes))
+        } else {
+            victory_shader::emit::translate(&bytes)
+        };
+        match made {
             Ok(shader) => {
                 println!("{path}: translated ({} bytes of DXIL)", shader.dxil.len());
                 if let Some(dir) = &out {
