@@ -671,7 +671,7 @@ pub(super) fn cut_for(runs: &[&HostList]) -> Option<usize> {
         return None;
     }
     let at = std::time::Instant::now();
-    let written = line().written.clone();
+    let written = line().blocking().clone();
     blocked_by(&written, runs, false)?;
     let (does, steps, _) = does_of(&written, runs);
     let mut behind = None;
@@ -1084,10 +1084,10 @@ impl Host {
         }
         let (written, copies) = {
             let line = line();
-            if line.written.is_empty() {
+            if line.blocking().is_empty() {
                 return None;
             }
-            (line.written.clone(), copies(&line))
+            (line.blocking().clone(), copies(&line))
         };
         let at = std::time::Instant::now();
         let blocked = blocked_by(&written, runs, false);

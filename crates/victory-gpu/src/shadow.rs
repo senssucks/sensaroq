@@ -16,7 +16,7 @@
 //! indexed heaps keep what their first use copied.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
@@ -51,11 +51,20 @@ pub(crate) struct Shadow {
     /// a range holds in part cannot say so in `copied`. Locked inside
     /// `copied`'s lock.
     ranged: Mutex<[(usize, usize, u64); 2]>,
+    /// Set once `ranged` holds a range: with [`fast_flags`], a buffer that
+    /// never took one skips `ranged`'s lock (trustno1-coder/VIctory-NVIDIA
+    /// #318).
+    ranged_any: AtomicBool,
     /// Whether the memory is write-watched: unknown, yes, no.
     watched: AtomicU8,
     /// Ranges shaders of a submission not yet copied back may be writing:
     /// title memory there is older than the copy.
     pending: Mutex<Vec<(usize, usize)>>,
+    /// Whether `pending` may hold a range: set before a range goes in,
+    /// cleared when it is left empty, both under its lock. With
+    /// [`fast_flags`], refresh checks of buffers no shader writes skip the
+    /// lock (trustno1-coder/VIctory-NVIDIA #318).
+    pending_any: AtomicBool,
     /// With [`relay`]: how many submissions not yet copied back declared
     /// each range of `pending` ([`Flights`]). Locked inside `pending`'s
     /// lock.
@@ -1804,6 +1813,19 @@ pub(crate) fn wide_run(jobs: Vec<Box<dyn FnOnce() + Send>>) {
     wide(jobs);
 }
 
+/// `VICTORY_REFRESH_FLAGS=1`: refresh checks read two flags of a buffer
+/// (`pending_any`, `ranged_any`) before taking its `pending` and `ranged`
+/// locks, and skip both (and the busy list's allocation) for buffers no
+/// shader writes and no range was taken whole of. Off by default. From
+/// trustno1-coder/VIctory-NVIDIA #318, without its shared journal read
+/// across a batch of checks: that holds the journal's read lock while
+/// taking each buffer's `copied` lock, the reverse of `nothing_new`'s order,
+/// and with a writer queued on the journal three threads can wait on one
+/// another.
+pub(crate) fn fast_flags() -> bool {
+    crate::asked_for!("VICTORY_REFRESH_FLAGS")
+}
+
 /// Calls `work` with every number under `n`, on the kept threads and on
 /// this one, the next number to whichever is free: for thousands of small
 /// pieces of work, where a job each ([`wide`]) is mostly the jobs' queue.
@@ -3462,8 +3484,10 @@ impl Shadow {
             len,
             copied: Mutex::new(vec![0; pages as usize]),
             ranged: Mutex::default(),
+            ranged_any: AtomicBool::new(false),
             watched: AtomicU8::new(0),
             pending: Mutex::default(),
+            pending_any: AtomicBool::new(false),
             flights: Mutex::default(),
             before: Mutex::default(),
             merging: RwLock::default(),
@@ -3610,6 +3634,7 @@ impl Shadow {
         // the card (`Host::card_before` reads the declared ranges from the
         // lists).
         if self.card.is_some() {
+            self.pending_any.store(true, Ordering::Release);
             pending.push(range);
             return;
         }
@@ -3634,6 +3659,7 @@ impl Shadow {
             }
             parts = rest;
         }
+        self.pending_any.store(true, Ordering::Release);
         pending.push(range);
         let taken: usize = parts.iter().map(|&(from, to)| to.saturating_sub(from)).sum();
         BACK_CLASS[usize::from(!self.window)].fetch_add(taken as u64, Ordering::Relaxed);
@@ -3932,6 +3958,9 @@ impl Shadow {
         } else {
             pending.retain(|r| !ranges.contains(r));
         }
+        if pending.is_empty() {
+            self.pending_any.store(false, Ordering::Release);
+        }
         if !pending.is_empty() || self.card.is_some() {
             return;
         }
@@ -3989,12 +4018,18 @@ impl Shadow {
     /// Whether shaders of a submission not yet copied back may be writing
     /// the copy.
     pub(crate) fn writes_pending(&self) -> bool {
+        if fast_flags() {
+            return self.pending_any.load(Ordering::Acquire);
+        }
         !self.pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
     }
 
     /// Whether one of those submissions may be writing in title memory
     /// `[from, to)`.
     pub(crate) fn writes_pending_in(&self, from: usize, to: usize) -> bool {
+        if fast_flags() && !self.pending_any.load(Ordering::Acquire) {
+            return false;
+        }
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|&(a, e)| a < to && e > from)
     }
 
@@ -4304,14 +4339,18 @@ impl Shadow {
         // new (`VICTORY_GAPS_KNOWN=0`: asked, as before). In the world most
         // submissions have such ranges, so most refreshes that copied
         // nothing used to ask anyway.
-        let mut busy: Vec<(usize, usize)> = self
-            .pending
+        let free = fast_flags() && !self.pending_any.load(Ordering::Acquire);
+        let mut busy: Vec<(usize, usize)> = if free {
+            Vec::new()
+        } else {
+            self.pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .copied()
             .filter(|&(a, e)| a < to && e > from)
-            .collect();
+            .collect()
+        };
         if !busy.is_empty() {
             if !crate::toggled!("VICTORY_GAPS_KNOWN") {
                 return false;
@@ -4344,6 +4383,9 @@ impl Shadow {
     /// The latest asking after which a range that holds `[from, to)` was
     /// taken whole (0: none is known). The caller holds `copied`'s lock.
     fn ranged(&self, from: usize, to: usize) -> u64 {
+        if fast_flags() && !self.ranged_any.load(Ordering::Acquire) {
+            return 0;
+        }
         let ranged = self.ranged.lock().unwrap_or_else(|e| e.into_inner());
         ranged.iter().filter(|r| r.0 <= from && to <= r.1).map(|r| r.2).max().unwrap_or(0)
     }
@@ -4501,6 +4543,7 @@ impl Shadow {
         if crate::watch::light() {
             // All of the range is in the copy as of this asking.
             let mut ranged = self.ranged.lock().unwrap_or_else(|e| e.into_inner());
+            self.ranged_any.store(true, Ordering::Release);
             ranged[0] = (from, to, now);
             if to - from >= ranged[1].1 - ranged[1].0 {
                 ranged[1] = (from, to, now);
@@ -5412,6 +5455,7 @@ mod land_tests {
         let Some(shadow) = copy_of(title, LEN) else {
             return; // no host GPU
         };
+        shadow.pending_any.store(true, Ordering::Release);
         shadow.pending.lock().unwrap().push((title, title + LEN));
         // SAFETY: committed, aligned; touched as atomics or by the landing's
         // stores of whole dwords.

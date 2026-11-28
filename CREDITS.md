@@ -75,6 +75,8 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [PR #448](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/448) | The heap pass walks only the active buffer slots, packed, with no per-frame map (no switch: same results, less work; a test checks it against a plain slot table) | Wiktorxd-1 |
 | [PR #619](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/619) | Every ray a miss (the node test answers nothing hit) and the ray-only skinning left out, for runs without the structure builder (`VICTORY_RT_MISS`, off by default here; `VICTORY_RT_SKIN=1` keeps the skinning); from edsuuu/VI-BR-PORT (GPL-3.0) | trustno1-coder, edsuuu |
 | [PR #537](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/537) | An opt-in `fast` build profile: thin LTO, one codegen unit (its release-profile half; not its panic = "abort") | hqjake |
+| [PR #501](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/501) | Of a big card copy (at least `VICTORY_LAZY_COMPARE_MB`), a submission compares only the pieces written lately, those about to be sent up and the next ones of a sweep; with `VICTORY_LAZY_NARROW=1` steps wait only for those pieces (both off by default) | ballsimulation |
+| [PR #318](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/318) | Refresh checks read two flags of a buffer before its `pending` and `ranged` locks, and skip both for buffers no shader writes (`VICTORY_REFRESH_FLAGS`, off by default here; its shared journal read left out) | wike1701 |
 
 ### stellarr-studio/kelvaroq (native patches)
 
