@@ -3165,12 +3165,38 @@ fn too_far_behind(line: &Line) -> bool {
     let Some(most) = frames_in_air() else {
         return false;
     };
-    let now = crate::frame::current();
-    line.line.iter().find_map(|item| match item {
+    let oldest = line.line.iter().find_map(|item| match item {
         Late::Run(flight) => Some(flight.frame),
         _ => None,
-    })
-    .is_some_and(|oldest| oldest + most < now)
+    });
+    behind(oldest, most, crate::frame::current())
+}
+
+/// Whether a flight of frame `oldest` is more than `most` frames behind
+/// frame `now` (none in the air: no).
+fn behind(oldest: Option<u64>, most: u64, now: u64) -> bool {
+    oldest.is_some_and(|oldest| oldest.saturating_add(most) < now)
+}
+
+#[cfg(test)]
+mod frames_in_air_tests {
+    use super::behind;
+
+    /// One frame in the air: the last frame's flights may still run, the
+    /// one's before them not; nothing in the air never waits.
+    #[test]
+    fn a_flight_is_behind_past_the_frames_allowed() {
+        assert!(!behind(None, 1, 100));
+        assert!(!behind(Some(100), 1, 100));
+        assert!(!behind(Some(99), 1, 100));
+        assert!(behind(Some(98), 1, 100));
+        assert!(!behind(Some(98), 2, 100));
+        assert!(behind(Some(0), 0, 1));
+        // (A frame counter that wrapped, or a flight noted ahead of the
+        // count: never behind.)
+        assert!(!behind(Some(u64::MAX), 1, 5));
+        assert!(!behind(Some(7), 1, 5));
+    }
 }
 
 fn late_most() -> usize {
