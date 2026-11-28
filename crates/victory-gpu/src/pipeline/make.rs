@@ -100,21 +100,28 @@ fn water_light_left_out(shaders: &[Arc<Shader>]) -> bool {
 /// Whether a compute program's container is one of the passes that only
 /// feed or walk the ray-tracing structures: the title's `bvh_skinning`
 /// programs (`CSComputeSkinning*`, characters skinned into the structures'
-/// vertex buffers) and the screen probes' tracers that walk the structures
-/// (`CS_ScreenProbes_TraceRays_*_BVH_*`; the `Fallback` and `Voxels`
-/// tracers, which do not, stay).
+/// vertex buffers) and its hair's (`CSGenerateHairVB`), the screen probes'
+/// tracers that walk the structures (`CS_ScreenProbes_TraceRays_*_BVH_*`)
+/// and the ray-traced visibility buffer (`CS_RaytraceVBuffer*`); of those
+/// two, the `Fallback` and `Voxels` forms, which walk no structure, stay.
+/// The names of trustno1-coder/VIctory-NVIDIA #47's dead passes; the raster
+/// and cloth skinning (`CS_PedStandardSkinning*`, `CS_PosOnlyLodSkinning*`,
+/// `computeclothSkinning`) are other names.
 fn bvh_pass(container: &[u8]) -> bool {
     let has = |name: &[u8]| container.windows(name.len()).any(|w| w == name);
-    if has(b"CSComputeSkinning") {
+    if has(b"CSComputeSkinning") || has(b"CSGenerateHairVB") {
         return true;
     }
     // The entry's name, as one run of bytes from its start.
-    const TRACE: &[u8] = b"CS_ScreenProbes_TraceRays_";
-    container.windows(TRACE.len()).enumerate().filter(|(_, w)| *w == TRACE).any(|(at, _)| {
-        let name: Vec<u8> = container[at..].iter().copied().take_while(|b| b.is_ascii_alphanumeric() || *b == b'_').collect();
-        let has_in = |part: &[u8]| name.windows(part.len()).any(|w| w == part);
-        has_in(b"_BVH") && !has_in(b"Fallback") && !has_in(b"Voxels")
-    })
+    let named_from = |start: &[u8], walks: &dyn Fn(&[u8]) -> bool| {
+        container.windows(start.len()).enumerate().filter(|(_, w)| *w == start).any(|(at, _)| {
+            let name: Vec<u8> = container[at..].iter().copied().take_while(|b| b.is_ascii_alphanumeric() || *b == b'_').collect();
+            let has_in = |part: &[u8]| name.windows(part.len()).any(|w| w == part);
+            walks(&name) && !has_in(b"Fallback") && !has_in(b"Voxels")
+        })
+    };
+    let bvh = |name: &[u8]| name.windows(4).any(|w| w == b"_BVH");
+    named_from(b"CS_ScreenProbes_TraceRays_", &bvh) || named_from(b"CS_RaytraceVBuffer", &|_| true)
 }
 
 /// `VICTORY_BVH_PASSES=0` (unset: run, as before): with no ray-tracing
@@ -125,7 +132,9 @@ fn bvh_pass(container: &[u8]) -> bool {
 /// velocity (~37 ms) and one ray-binning tracer (32-38 ms) at the top before.
 /// What it risks: the indirect light of the screen probes is what the other
 /// tracers find alone; whether a skinning pass's output feeds anything but
-/// the structures was not compared in pictures there.
+/// the structures was not compared in pictures there. The hair vertex pass
+/// (`CSGenerateHairVB`) and the ray-traced V-buffer passes (not their voxel
+/// or fallback forms) are on trustno1-coder's list of dead-RT passes (#47).
 fn bvh_passes_left_out() -> bool {
     static OUT: OnceLock<bool> = OnceLock::new();
     *OUT.get_or_init(|| {
@@ -968,6 +977,14 @@ mod bvh_pass_tests {
         assert!(!bvh_pass(&with("CS_ScreenProbes_TraceRays_Voxels")));
         assert!(!bvh_pass(&with("CS_ScreenProbes_ActivateRays")));
         assert!(!bvh_pass(&with("CS_RaytracingResolve")));
+        assert!(bvh_pass(&with("CSGenerateHairVB")));
+        assert!(bvh_pass(&with("CS_RaytraceVBuffer")));
+        assert!(bvh_pass(&with("CS_RaytraceVBuffer_Opaque")));
+        assert!(!bvh_pass(&with("CS_RaytraceVBuffer_Voxels")));
+        assert!(!bvh_pass(&with("CS_RaytraceVBufferFallback")));
+        for raster in ["CS_PedStandardSkinning", "CS_PosOnlyLodSkinning", "computeclothSkinning", "CS_Primary_GatherCopy"] {
+            assert!(!bvh_pass(&with(raster)), "{raster}");
+        }
         // (The tracer's name ends where its run of name bytes ends: a BVH
         // further on in the container is another name's.)
         assert!(!bvh_pass(&[with("CS_ScreenProbes_TraceRays_Voxels"), with("CS_BVH_Refit")].concat()));
