@@ -165,6 +165,29 @@ pub extern "system" fn XDspActivate(
                 "audio DSP stream activated (first 32; its output is silence unless VICTORY_DSP_DRY=1)"
             );
         }
+        // `VICTORY_DSP_IR_DUMP=<dir>` (off by default): the first 4 impulse
+        // responses as the title hands them (little-endian f32), to work out
+        // the coprocessor's layout offline. Their sizes are whole multiples
+        // of 2048 floats (66 to 95 of them in session 32), which looks like
+        // partitions of a 2048-point transform of 1024-frame blocks.
+        if let Some(dir) = std::env::var_os("VICTORY_DSP_IR_DUMP") {
+            static DUMPED: Mutex<u32> = Mutex::new(0);
+            let mut dumped = DUMPED.lock().unwrap_or_else(|e| e.into_inner());
+            let ir = desc.ir;
+            let ir_floats = desc.ir_floats as usize;
+            if *dumped < 4 && !ir.is_null() && ir_floats > 0 {
+                // SAFETY: the title's impulse response of `ir_floats` floats.
+                let floats = unsafe { std::slice::from_raw_parts(ir.cast::<u8>(), ir_floats * 4) };
+                let dir = std::path::PathBuf::from(dir);
+                let _ = std::fs::create_dir_all(&dir);
+                let name = format!("ir-{}-f{frames}-c{channels}-n{ir_floats}.f32", *dumped);
+                match std::fs::write(dir.join(&name), floats) {
+                    Ok(()) => tracing::info!(name, "audio DSP impulse response dumped (VICTORY_DSP_IR_DUMP)"),
+                    Err(e) => tracing::warn!(error = %e, "audio DSP impulse response not dumped"),
+                }
+                *dumped += 1;
+            }
+        }
     }
     {
         // SAFETY: a connection from `XDspConnectWithMaximumStreamLimit`.
