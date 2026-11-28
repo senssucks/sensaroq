@@ -314,6 +314,41 @@ static CARD_REFUSED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 /// copies of title buffers not made yet ([`card_room_kept_on`]): 0 with
 /// the switch off or without card copies.
 pub(crate) fn card_room_kept() -> u64 {
+    buffer_room_kept().saturating_add(window_room_kept())
+}
+
+/// Whether the texture queue also leaves room on the card for windows not
+/// made yet (`VICTORY_CARD_ROOM_FOR_WINDOWS=1`; off by default), and a window
+/// may go to the card up to 97 hundredths of its budget, as a title
+/// buffer's copy whose room was kept ([`window_line`]). Windows are made all
+/// through a run, after the textures have filled the card to their line, so
+/// without it later windows stay in the PC's memory and draws read them over
+/// the bus. After fxceless/victory-fork #1476 (an idea port): on an RTX 5090,
+/// with every title buffer and the windows on the card, the card worked 26.6
+/// ms a frame where it had worked 53.8, its compute 7.5 ms where 29.9.
+fn window_room_kept_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_ROOM_FOR_WINDOWS").is_some_and(|v| v == "1"))
+}
+
+/// The room [`window_room_kept_on`] keeps: what is left of the windows' limit
+/// ([`window_card_most`]), at most 2 GiB (what windows came to with every
+/// limit raised on a 32 GB card, fxceless #1476); 0 with the switch off,
+/// without card copies or before the host is there.
+fn window_room_kept() -> u64 {
+    if !window_room_kept_on() || !cards() || host().is_none() {
+        return 0;
+    }
+    window_kept(window_card_most(), WINDOW_CARD_BYTES.load(Ordering::Relaxed))
+}
+
+/// [`window_room_kept`] from the windows' limit and what they hold.
+fn window_kept(most: u64, held: u64) -> u64 {
+    most.min(2 << 30).saturating_sub(held)
+}
+
+/// The room kept for card copies of title buffers not made yet.
+fn buffer_room_kept() -> u64 {
     if !card_room_kept_on() || !cards() {
         return 0;
     }
@@ -522,7 +557,8 @@ fn default_window_card_mb(local_vram_budget: Option<u64>) -> u64 {
 
 /// How full the card may be, in hundredths of its budget, for a window to
 /// go to its memory ([`window_room_for`], [`window_mapped_for`]):
-/// `VICTORY_WINDOW_CARD_LINE` (unset: 80, as before; read from 50 to 95).
+/// `VICTORY_WINDOW_CARD_LINE` (unset: 80, as before, or 97 with
+/// `VICTORY_CARD_ROOM_FOR_WINDOWS=1`; read from 50 to 97).
 ///
 /// At 80 the windows lose to textures, whose line is near 95 (`resource::room_line`):
 /// in session 32 (RTX 5060 Ti, budget 14,809 MB) the card held 11.3-12.1 GB,
@@ -538,8 +574,13 @@ fn window_line(budget: u64) -> u64 {
 }
 
 /// The hundredths of [`window_line`] a `VICTORY_WINDOW_CARD_LINE` value says.
+/// Unset, 80, or 97 with the windows' room kept ([`window_room_kept_on`]).
 fn window_line_percent(value: Option<&str>) -> u64 {
-    value.and_then(|v| v.trim().parse::<u64>().ok()).map_or(80, |p| p.clamp(50, 95))
+    line_percent(value, window_room_kept_on())
+}
+
+fn line_percent(value: Option<&str>, kept: bool) -> u64 {
+    value.and_then(|v| v.trim().parse::<u64>().ok()).map_or(if kept { 97 } else { 80 }, |p| p.clamp(50, 97))
 }
 
 /// Bytes alive of windows' card sides ([`window_card_most`]).
@@ -6464,19 +6505,29 @@ mod wide_chunk_tests {
 
 #[cfg(test)]
 mod window_line_tests {
-    use super::window_line_percent;
+    use super::{line_percent, window_kept};
 
     #[test]
     fn the_window_line_is_read_in_hundredths_and_held_in_bounds() {
-        assert_eq!(window_line_percent(None), 80);
-        assert_eq!(window_line_percent(Some("")), 80);
-        assert_eq!(window_line_percent(Some("x")), 80);
-        assert_eq!(window_line_percent(Some(" 90 ")), 90);
-        assert_eq!(window_line_percent(Some("99")), 95);
-        assert_eq!(window_line_percent(Some("10")), 50);
+        assert_eq!(line_percent(None, false), 80);
+        assert_eq!(line_percent(None, true), 97);
+        assert_eq!(line_percent(Some(""), false), 80);
+        assert_eq!(line_percent(Some("x"), false), 80);
+        assert_eq!(line_percent(Some(" 90 "), true), 90);
+        assert_eq!(line_percent(Some("99"), false), 97);
+        assert_eq!(line_percent(Some("10"), false), 50);
         // Session 32's card: 1.8 GB of windows fit under a line of 90.
         let budget = 14_809u64 << 20;
         assert!(12_100u64 << 20 > budget / 100 * 80);
         assert!((12_100u64 << 20) + (1_800 << 20) < budget / 100 * 95);
+    }
+
+    #[test]
+    fn the_room_kept_for_windows_is_what_their_limit_has_left_at_most_2_gib() {
+        const MIB: u64 = 1 << 20;
+        assert_eq!(window_kept(4096 * MIB, 1271 * MIB), 777 * MIB);
+        assert_eq!(window_kept(1024 * MIB, 256 * MIB), 768 * MIB);
+        assert_eq!(window_kept(1024 * MIB, 2048 * MIB), 0);
+        assert_eq!(window_kept(0, 0), 0);
     }
 }
