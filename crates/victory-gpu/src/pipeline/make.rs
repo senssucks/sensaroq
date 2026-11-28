@@ -143,6 +143,42 @@ fn bvh_passes_left_out() -> bool {
     })
 }
 
+/// The indirect light probes' primary passes, by entry name: the gather copy
+/// first (DoubleGhosty/cool_fox #113: 49.7 of 128.5 ms of an RTX 3050's card
+/// time a world frame), then its siblings (Dathinel/victory-4gb #37: 12.5, 4.2
+/// and 2.6 ms; 6.3 to 7.6 fps). The light they make is what `VICTORY_AMBIENT`'s
+/// stand-in gives without them; captures of both sides showed no difference to
+/// the eye there (Series S, one card).
+const PRIMARY_PROBES: [&[u8]; 4] = [
+    b"CS_Primary_GatherCopy",
+    b"CS_Primary_GatherVBuffer_WithFar",
+    b"CS_Primary_ShadeCopy",
+    b"CS_Primary_RegisterAllocationRequests",
+];
+
+/// How many of [`PRIMARY_PROBES`] a `VICTORY_PRIMARY_PROBES` value leaves out:
+/// `copy` the gather copy alone, `0` all four, anything else (unset) none.
+fn primary_probes_out(value: Option<&std::ffi::OsStr>) -> usize {
+    match value.and_then(|v| v.to_str()) {
+        Some("copy") => 1,
+        Some("0") => PRIMARY_PROBES.len(),
+        _ => 0,
+    }
+}
+
+/// `VICTORY_PRIMARY_PROBES=copy|0` (unset: all run, as before), see
+/// [`PRIMARY_PROBES`]; with `VICTORY_BVH_BUILDER=1` they always run.
+fn primary_probes_left_out(shaders: &[Arc<Shader>]) -> bool {
+    static OUT: OnceLock<usize> = OnceLock::new();
+    let out = *OUT.get_or_init(|| {
+        if std::env::var_os("VICTORY_BVH_BUILDER").is_some_and(|v| v == "1") {
+            return 0;
+        }
+        primary_probes_out(std::env::var_os("VICTORY_PRIMARY_PROBES").as_deref())
+    });
+    out > 0 && PRIMARY_PROBES[..out].iter().any(|name| named(shaders, name))
+}
+
 /// With `VICTORY_RT_MISS=1` ([`victory_shader::emit::rt_miss`]) and no
 /// structure builder: the title's ray-only skinning programs
 /// (`CSComputeSkinning*`) are left out too (`VICTORY_RT_SKIN=1` runs them).
@@ -162,6 +198,9 @@ fn left_out(shaders: &[Arc<Shader>]) -> Option<&'static str> {
     }
     if bvh_passes_left_out() && shaders.iter().any(|s| s.stage == "compute" && bvh_pass(&s.container)) {
         return Some("feeds or walks the ray-tracing structures, none built (VICTORY_BVH_PASSES=0), left out");
+    }
+    if primary_probes_left_out(shaders) {
+        return Some("an indirect light probe pass the light estimate stands in for (VICTORY_PRIMARY_PROBES), left out");
     }
     if !leave_out().is_empty() && shaders.iter().any(|s| leave_out().contains(&s.hash)) {
         return Some("named in VICTORY_LEAVE_OUT, left out");
@@ -990,5 +1029,22 @@ mod bvh_pass_tests {
         assert!(!bvh_pass(&[with("CS_ScreenProbes_TraceRays_Voxels"), with("CS_BVH_Refit")].concat()));
         // Two tracers in one container: one that walks the structures is enough.
         assert!(bvh_pass(&[with("CS_ScreenProbes_TraceRays_Voxels"), with("CS_ScreenProbes_TraceRays_BVH_X")].concat()));
+    }
+}
+
+#[cfg(test)]
+mod primary_probes_tests {
+    use super::{primary_probes_out, PRIMARY_PROBES};
+    use std::ffi::OsStr;
+
+    #[test]
+    fn the_value_says_how_many_probe_passes_go() {
+        assert_eq!(primary_probes_out(None), 0);
+        assert_eq!(primary_probes_out(Some(OsStr::new("1"))), 0);
+        assert_eq!(primary_probes_out(Some(OsStr::new(""))), 0);
+        assert_eq!(primary_probes_out(Some(OsStr::new("copy"))), 1);
+        assert_eq!(primary_probes_out(Some(OsStr::new("0"))), 4);
+        // `copy` is the gather copy alone, the heaviest of the four.
+        assert_eq!(PRIMARY_PROBES[0], b"CS_Primary_GatherCopy");
     }
 }
