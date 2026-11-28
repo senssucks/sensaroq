@@ -10602,10 +10602,26 @@ impl Host {
 /// 32 GB machine, and the lines of ours account for some 2.5 GB of it
 /// (windows); this tells the title's own memory, below 1 TiB, from ours and
 /// the driver's above it and below 4 GiB, and names the largest regions and
-/// what grew since the last walk. A walk takes a few milliseconds.
+/// what grew since the last walk. A walk takes 0.4-0.8 s with some 60,000
+/// regions, so it runs on a thread of its own ([`memory_map_start`]).
 fn memory_map() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_MEMORY_MAP").is_some_and(|v| v == "1"))
+}
+
+/// Starts the walks of [`memory_map`] on a thread of their own, once a
+/// minute: on the submitting thread a walk held the game 0.4-0.8 s every
+/// 30 s (session 38).
+fn memory_map_start() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let _ = std::thread::Builder::new().name("victory-memory-map".into()).spawn(|| {
+            loop {
+                memory_map_line();
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        });
+    });
 }
 
 /// One walk for [`memory_map`], logged.
@@ -10654,16 +10670,43 @@ fn memory_map_line() {
         .filter(|&(_, d)| d != 0)
         .collect();
     grew.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    // Allocations above 1 TiB by size: up to 1 MiB, 16 MiB, 63 MiB, 64 MiB
+    // exactly (the texture and staging pools' blocks), more; count and MB.
+    let mut classes = [(0usize, 0usize); 5];
+    for (&b, &n) in &by_base {
+        if b < TITLE_END {
+            continue;
+        }
+        let c = match n {
+            0..=0xF_FFFF => 0,
+            0x10_0000..=0xFF_FFFF => 1,
+            0x100_0000..=0x3FF_FFFF => 2,
+            0x400_0000 => 3,
+            _ => 4,
+        };
+        classes[c].0 += 1;
+        classes[c].1 += n;
+    }
     let gone: usize = last.iter().filter(|(b, _)| !by_base.contains_key(b)).map(|(_, &n)| n).sum();
     let new_bases = by_base.keys().filter(|b| !last.contains_key(b)).count();
     let fmt = |v: &[(usize, usize)]| v.iter().take(8).map(|(b, n)| format!("{b:#x} {} MB", n / MB)).collect::<Vec<_>>().join(", ");
     let fmt_grew = |v: &[(usize, isize)]| v.iter().take(8).map(|(b, d)| format!("{b:#x} {:+} MB", d / MB as isize)).collect::<Vec<_>>().join(", ");
     tracing::info!(
-        "where the private memory lies (VICTORY_MEMORY_MAP): below 4 GiB {} MB, the title's (4 GiB to 1 TiB) {} MB, above 1 TiB (ours, the driver's) {} MB, in {} allocations; mapped (sections) {} MB, images {} MB; the largest: {}; grew most since the last walk: {}; {} allocations new, {} MB in ones gone; walked in {:.1} ms",
+        "where the private memory lies (VICTORY_MEMORY_MAP): below 4 GiB {} MB, the title's (4 GiB to 1 TiB) {} MB, above 1 TiB (ours, the driver's) {} MB, in {} allocations (above 1 TiB by size, count/MB: under 1 MiB {}/{}, under 16 MiB {}/{}, under 64 MiB {}/{}, 64 MiB exactly {}/{}, more {}/{}); mapped (sections) {} MB, images {} MB; the largest: {}; grew most since the last walk: {}; {} allocations new, {} MB in ones gone; walked in {:.1} ms",
         sums[0] / MB,
         sums[1] / MB,
         sums[2] / MB,
         by_base.len(),
+        classes[0].0,
+        classes[0].1 / MB,
+        classes[1].0,
+        classes[1].1 / MB,
+        classes[2].0,
+        classes[2].1 / MB,
+        classes[3].0,
+        classes[3].1 / MB,
+        classes[4].0,
+        classes[4].1 / MB,
         sums[3] / MB,
         sums[4] / MB,
         fmt(&largest),
@@ -10920,7 +10963,7 @@ impl Meter {
                             crate::shadow::SIDES_MADE[1].load(Ordering::Relaxed) >> 20
                         );
                         if memory_map() {
-                            memory_map_line();
+                            memory_map_start();
                         }
                         let [n, bytes, asked, carded] = crate::shadow::window_room();
                         let [card, before] = [0, 1].map(|i| crate::shadow::CARD_BYTES[i].load(Ordering::Relaxed));

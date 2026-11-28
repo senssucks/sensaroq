@@ -56,11 +56,25 @@ pub(crate) fn room(memory: Option<[u64; 4]>) {
             0
         } else if pressure {
             1
+        } else if staging_cap() {
+            limit.min(STAGING_KEPT)
         } else {
             limit
         };
         pool.reclaim(tick, staging_limit, true);
     }
+}
+
+/// Whether the empty blocks of staging buffers kept stop at
+/// [`STAGING_KEPT`] (512 MB) also while the card has room
+/// (`VICTORY_STAGING_CAP=1`; off by default: as many as of texture blocks,
+/// [`SPARE_KEPT`], 4 GB of the PC's memory). Staging blocks are the PC's
+/// memory whatever the card holds: the card's room says nothing of them.
+/// Session 38 had 23 GB of private memory of ours and the driver's above
+/// the title's, much of it in allocations of 64 MiB, a block's size.
+fn staging_cap() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_STAGING_CAP").is_some_and(|v| v == "1"))
 }
 
 fn spares(memory: Option<[u64; 4]>, keep: bool) -> usize {
