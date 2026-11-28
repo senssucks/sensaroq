@@ -148,25 +148,31 @@ fn bvh_passes_left_out() -> bool {
 /// time a world frame), then its siblings (Dathinel/victory-4gb #37: 12.5, 4.2
 /// and 2.6 ms; 6.3 to 7.6 fps). The light they make is what `VICTORY_AMBIENT`'s
 /// stand-in gives without them; captures of both sides showed no difference to
-/// the eye there (Series S, one card).
-const PRIMARY_PROBES: [&[u8]; 4] = [
+/// the eye there (Series S, one card). Last, the irradiance cache's own
+/// allocation requests (`e07a678d3f79d4cd`, a 64-lane program a 32-lane card
+/// runs wave-wide: 8.2 ms of an RTX 5060's frame, DoubleGhosty/cool_fox #103),
+/// whose cache no fork has left out yet.
+const PRIMARY_PROBES: [&[u8]; 5] = [
     b"CS_Primary_GatherCopy",
     b"CS_Primary_GatherVBuffer_WithFar",
     b"CS_Primary_ShadeCopy",
     b"CS_Primary_RegisterAllocationRequests",
+    b"CS_IrradianceCache_RegisterAllocationRequests",
 ];
 
 /// How many of [`PRIMARY_PROBES`] a `VICTORY_PRIMARY_PROBES` value leaves out:
-/// `copy` the gather copy alone, `0` all four, anything else (unset) none.
+/// `copy` the gather copy alone, `0` the four primary passes, `all` the
+/// irradiance cache's requests too, anything else (unset) none.
 fn primary_probes_out(value: Option<&std::ffi::OsStr>) -> usize {
     match value.and_then(|v| v.to_str()) {
         Some("copy") => 1,
-        Some("0") => PRIMARY_PROBES.len(),
+        Some("0") => 4,
+        Some("all") => PRIMARY_PROBES.len(),
         _ => 0,
     }
 }
 
-/// `VICTORY_PRIMARY_PROBES=copy|0` (unset: all run, as before), see
+/// `VICTORY_PRIMARY_PROBES=copy|0|all` (unset: all run, as before), see
 /// [`PRIMARY_PROBES`]; with `VICTORY_BVH_BUILDER=1` they always run.
 fn primary_probes_left_out(shaders: &[Arc<Shader>]) -> bool {
     static OUT: OnceLock<usize> = OnceLock::new();
@@ -1044,6 +1050,8 @@ mod primary_probes_tests {
         assert_eq!(primary_probes_out(Some(OsStr::new(""))), 0);
         assert_eq!(primary_probes_out(Some(OsStr::new("copy"))), 1);
         assert_eq!(primary_probes_out(Some(OsStr::new("0"))), 4);
+        assert_eq!(primary_probes_out(Some(OsStr::new("all"))), 5);
+        assert_eq!(PRIMARY_PROBES[4], b"CS_IrradianceCache_RegisterAllocationRequests");
         // `copy` is the gather copy alone, the heaviest of the four.
         assert_eq!(PRIMARY_PROBES[0], b"CS_Primary_GatherCopy");
     }
