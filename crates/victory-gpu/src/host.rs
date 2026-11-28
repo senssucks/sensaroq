@@ -3053,6 +3053,31 @@ mod relay_tests {
 /// descriptor slots, upload
 /// memory and scratch chunks are held until then, and a frame's lists held
 /// all at once ran the slots out before (run 45).
+/// At most this many of the title's frames before the current one with
+/// submissions still on the card (`VICTORY_FRAMES_IN_AIR=<n>`; unset: no
+/// such limit, only [`late_most`]). In session 32 the card was the gate and
+/// every wait of the submitting thread was for 256 lists in the air: frames
+/// of work queued on the card, each a frame more between the controller
+/// and the screen (about half a second at 9 fps).
+fn frames_in_air() -> Option<u64> {
+    static MOST: OnceLock<Option<u64>> = OnceLock::new();
+    *MOST.get_or_init(|| std::env::var("VICTORY_FRAMES_IN_AIR").ok().and_then(|v| v.trim().parse().ok()))
+}
+
+/// Whether the oldest flight in `line` is more than [`frames_in_air`]
+/// frames behind the title.
+fn too_far_behind(line: &Line) -> bool {
+    let Some(most) = frames_in_air() else {
+        return false;
+    };
+    let now = crate::frame::current();
+    line.line.iter().find_map(|item| match item {
+        Late::Run(flight) => Some(flight.frame),
+        _ => None,
+    })
+    .is_some_and(|oldest| oldest + most < now)
+}
+
 fn late_most() -> usize {
     static MOST: OnceLock<usize> = OnceLock::new();
     *MOST.get_or_init(|| {
@@ -3102,6 +3127,8 @@ struct Flight {
     /// The list of ours that ran ahead of them ([`card_steps`]).
     own: Option<card_steps::Taken>,
     texture_back_ranges: Vec<(usize, usize)>,
+    /// The title's frame when it was sent ([`frames_in_air`]).
+    frame: u64,
 }
 
 /// One thing in the line of what waits for the card, in order.
@@ -5933,9 +5960,10 @@ impl Host {
                 back: sent.back,
                 own: sent.own,
                 texture_back_ranges: sent.texture_back_ranges,
+                frame: crate::frame::current(),
             }));
             items.extend(sent.writes.into_iter().map(|(at, what, bytes)| Late::Write(at, what, bytes)));
-            *flying >= late_most()
+            *flying >= late_most() || too_far_behind(&line)
         };
         LATE_STATS[0].fetch_add(1, Ordering::Relaxed);
         RELAY_MOVED.notify_one();
@@ -5945,7 +5973,7 @@ impl Host {
             self.settle(&mut submitted, WHY_READ);
         } else if most && relay_exact() {
             // Until there are fewer, not until there are none.
-            relay_wait(WHY_MOST, |line| line.lists < late_most());
+            relay_wait(WHY_MOST, |line| line.lists < late_most() && !too_far_behind(line));
         } else if most {
             self.settle(&mut submitted, WHY_MOST);
         } else {
@@ -5989,6 +6017,7 @@ impl Host {
                 back: sent.back,
                 own: sent.own,
                 texture_back_ranges: sent.texture_back_ranges,
+                frame: crate::frame::current(),
             }));
             items.extend(sent.writes.into_iter().map(|(at, what, bytes)| Late::Write(at, what, bytes)));
         }
