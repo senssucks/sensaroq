@@ -1,0 +1,73 @@
+# Runs the game a few times with different switches, a set time each, and compares the runs by the numbers in
+# their logs (scripts/log_summary.py). Load a save at a fixed spot before you start: each run continues the last
+# save, so leave the character standing still there (or the same short walk each time) for fair numbers.
+#
+#   .\scripts\bench.ps1 -Exe 'E:\Wabbleshot\game_scarlett_master.exe'
+#   .\scripts\bench.ps1 -Exe ... -Minutes 6 -Variants '', 'VICTORY_WIDE_SPIN=50', 'VICTORY_TEXTURE_STAGE_MS=50'
+#
+# Each variant is a list of switches, NAME=value separated by ';', put over the launcher's (play-foxhound.ps1 -More).
+# VICTORY_THIN=1 records the title's list calls on eight threads of ours instead of the title's own (findings.md:
+# 75 -> 68 ms a frame on an i9), but washed the scene out on an RTX 5060 Ti in another fork (avatarmanz#112): look at
+# the picture during that run.
+# VICTORY_PORT_CONSTANTS=1 and VICTORY_INPLACE=1 let the card read some title memory where it lies instead of the
+# layer copying it each frame: less CPU, more work over PCIe for the card (idle about half the frame on a 5060 Ti).
+# '' is the launcher as it is. Each variant runs -Minutes in the world, after loading (up to -LoadMinutes) and a first
+# minute in the world that is left out of the numbers (shaders, streaming).
+# Results go to bench-<time>.txt in the logs folder (%LOCALAPPDATA%\victory\logs) and on screen.
+param(
+    [Parameter(Mandatory)][string]$Exe,
+    [double]$Minutes = 5,
+    [double]$LoadMinutes = 6,
+    [string[]]$Variants = @('', 'VICTORY_PORT_CONSTANTS=1', 'VICTORY_INPLACE=1', 'VICTORY_PIPELINE_WORKERS=4', 'VICTORY_WIDE_SPIN=50', 'VICTORY_THIN=1'),
+    [string[]]$PlayArgs = @()
+)
+$play = Join-Path $PSScriptRoot 'play-foxhound.ps1'
+$summary = Join-Path $PSScriptRoot 'log_summary.py'
+$logs = Join-Path $env:LOCALAPPDATA 'victory\logs'
+# py (the Python launcher) first: 'python' is often only the Microsoft Store's stand-in in WindowsApps.
+$python = Get-Command py -ErrorAction SilentlyContinue
+if (-not $python) { $python = Get-Command python -ErrorAction SilentlyContinue | Where-Object { $_.Source -notmatch 'WindowsApps' } | Select-Object -First 1 }
+$made = @()
+foreach ($variant in $Variants) {
+    $pairs = @($variant -split ';' | Where-Object { $_ -match '=' } | ForEach-Object {
+        $k, $v = $_ -split '=', 2
+        "$($k.Trim())='$($v.Trim() -replace "'", "''")'"
+    })
+    $more = '@{' + ($pairs -join '; ') + '}'
+    $name = if ($variant) { $variant } else { '(launcher as it is)' }
+    Write-Host "== $name, $Minutes min"
+    $before = Get-Date
+    $command = "& '$($play -replace "'", "''")' -Exe '$($Exe -replace "'", "''")' -More $more $($PlayArgs -join ' ')"
+    $shell = (Get-Process -Id $PID).Path
+    $run = Start-Process $shell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command -PassThru
+    # The clock starts once the world is drawn (a frame line with 1000+ draws), at most -LoadMinutes after the
+    # start; then the minute log_summary leaves out, then -Minutes.
+    $deadline = (Get-Date).AddMinutes($LoadMinutes); $inWorld = $false
+    while (-not $inWorld -and (Get-Date) -lt $deadline -and -not $run.HasExited) {
+        Start-Sleep -Seconds 5
+        $now = Get-ChildItem $logs -Filter 'foxhound-*.log' | Where-Object { $_.LastWriteTime -ge $before } |
+            Sort-Object LastWriteTime | Select-Object -Last 1
+        if ($now) {
+            $inWorld = [bool](Get-Content -LiteralPath $now.FullName -Tail 400 -ErrorAction SilentlyContinue |
+                Where-Object { $_ -match ', (\d+) draws/frame' -and [int]$Matches[1] -ge 1000 } | Select-Object -First 1)
+        }
+    }
+    Write-Host $(if ($inWorld) { "   in the world after $([int]((Get-Date) - $before).TotalSeconds) s" } else { '   the world was not reached: measuring anyway' })
+    Start-Sleep -Seconds ([int](($Minutes + 1) * 60))
+    Get-Process victory -ErrorAction SilentlyContinue | Where-Object { $_.StartTime -ge $before } | Stop-Process -Force
+    Start-Sleep -Seconds 3
+    if (-not $run.HasExited) { Stop-Process -Id $run.Id -Force -ErrorAction SilentlyContinue }
+    $log = Get-ChildItem $logs -Filter 'foxhound-*.log' | Where-Object { $_.LastWriteTime -ge $before } |
+        Sort-Object LastWriteTime | Select-Object -Last 1
+    if ($log) { $made += $log.FullName; Write-Host "   log: $($log.FullName)" } else { Write-Host '   no log found' }
+    Start-Sleep -Seconds 10   # let the PC settle (files closed, memory given back)
+}
+if (-not $made) { return }
+$out = Join-Path $logs ('bench-{0:yyyyMMdd-HHmmss}.txt' -f (Get-Date))
+if ($python) {
+    & $python.Source $summary --no-switches @made | Tee-Object -FilePath $out
+    Write-Host "Saved: $out"
+} else {
+    Write-Host 'No Python to sum the logs up with; send these logs instead:'
+    $made | ForEach-Object { Write-Host "   $_" }
+}
