@@ -720,6 +720,7 @@ pub fn emit(
     io: &io::Io,
     res: &resource::Resources,
 ) -> Result<HostShader, ShaderError> {
+    WATER.with(|w| w.set(is_water(c)));
     let first = emit_once(c, native, p, st, io, res);
     if !matches!(first, Err(ShaderError::Unsupported { .. })) || !loops_wave(native) {
         return first;
@@ -736,6 +737,24 @@ pub fn emit(
         }
         Err(_) => first,
     }
+}
+
+thread_local! {
+    /// Whether the program [`emit`] is translating is one of the water's
+    /// (`water_shading`, `CS_TransmissionVolumetrics*`): for the `water`
+    /// value of `VICTORY_LOOPS_WAVE` and `VICTORY_LDS_FIRST_INIT`.
+    static WATER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a container names the water's programs.
+fn is_water(c: &Container) -> bool {
+    const NAMES: [&[u8]; 2] = [b"water_shading", b"CS_TransmissionVolumetrics"];
+    c.parts.iter().any(|part| NAMES.iter().any(|n| part.data.windows(n.len()).any(|w| w == *n)))
+}
+
+/// See [`WATER`].
+pub(crate) fn water_program() -> bool {
+    WATER.with(std::cell::Cell::get)
 }
 
 thread_local! {
@@ -1188,6 +1207,7 @@ fn widen(
 /// together where cross-lane code depends on the wave ([`emit_program`];
 /// trustno1-coder/VIctory-NVIDIA v2026.11.27.8, on by default there; off by default here):
 /// - `1`: console wave64 compute programs on a host of 32-lane waves;
+/// - `water`: those of them that are the water's ([`water_program`]);
 /// - `2`: every compute program;
 /// - unset or `0`: none, as before.
 fn loops_wave(native: &NativeProgram) -> bool {
@@ -1196,6 +1216,9 @@ fn loops_wave(native: &NativeProgram) -> bool {
     }
     match std::env::var("VICTORY_LOOPS_WAVE").ok().as_deref().map(str::trim) {
         Some("1") => native.wave64 && lower::host_max_wave() == 32,
+        // The water's programs alone: on every wave64 program the step left
+        // faces and skin out (s43b, 2026-11-28).
+        Some("water") => native.wave64 && lower::host_max_wave() == 32 && water_program(),
         Some("2") => true,
         _ => false,
     }

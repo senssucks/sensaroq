@@ -6286,8 +6286,11 @@ impl<'a> Lower<'a> {
         data: &[Operand],
         elements: &[(u32, u32)],
     ) -> Option<(V, Vec<(u32, u32)>)> {
-        if !std::env::var("VICTORY_LDS_FIRST_INIT").is_ok_and(|v| v.trim() == "1") {
-            return None;
+        // (`water`: the water's programs alone, [`super::water_program`])
+        match std::env::var("VICTORY_LDS_FIRST_INIT").as_deref().map(str::trim) {
+            Ok("1") => {}
+            Ok("water") if super::water_program() => {}
+            _ => return None,
         }
         let StageIo::Cs(cs) = self.x.native.io else { return None };
         let p = self.x.p;
