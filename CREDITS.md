@@ -101,6 +101,7 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [DoubleGhosty/cool_fox PR #20](https://github.com/DoubleGhosty/cool_fox/pull/20) | The most spare scratch chunks and send buffers kept (`VICTORY_SCRATCH_SPARE_MB`, `VICTORY_SEND_SPARE_MB`; unset as before) | Esteban Viera |
 | [DexNom/VIctory PR #149](https://github.com/DexNom/VIctory/pull/149) | Atomic subtractions on group memory as compare-exchange loops, so NVIDIA makes the pipeline (weatherParticle CS_BeginUpdate, 7f61193d2c0e5f22, refused as out of memory; `VICTORY_ATOMIC_SUB_LOOP`, off by default here; also Marvisak/VIctory #3619) | notquiteog |
 | [DoubleGhosty/cool_fox issue #94](https://github.com/DoubleGhosty/cool_fox/issues/94) | Idea: named wave64 programs taken wave-wide on 32-lane cards, which brought the water passes back on an RTX 5080 (`VICTORY_WAVE_WIDE_ONLY`, written anew, unset = none) | cool_fox reporter |
+| [ZSlayerHQ/zslayer-pc-port-runtime PR #7](https://github.com/ZSlayerHQ/zslayer-pc-port-runtime/pull/7) | Idea: with no ray-tracing structures built, the passes that only feed or walk them (`CSComputeSkinning*`, `CS_ScreenProbes_TraceRays_*_BVH_*`) left out (`VICTORY_BVH_PASSES=0`, written anew, unset = run as before) | ZSlayerHQ |
 | [HumanlyDev/HUMAN PR #18](https://github.com/HumanlyDev/HUMAN/pull/18) | Dynamic descriptor slots as a bitset, searched 64 at a time (hand-ported) | HumanlyDev |
 
 The NVIDIA fork watch that finds these lives in the project notes. New ports are added here as they land.

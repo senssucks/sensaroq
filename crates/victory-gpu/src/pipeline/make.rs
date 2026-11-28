@@ -97,7 +97,47 @@ fn water_light_left_out(shaders: &[Arc<Shader>]) -> bool {
         && shaders.iter().any(|s| WATER_LIGHT.contains(&s.hash.as_str()))
 }
 
+/// Whether a compute program's container is one of the passes that only
+/// feed or walk the ray-tracing structures: the title's `bvh_skinning`
+/// programs (`CSComputeSkinning*`, characters skinned into the structures'
+/// vertex buffers) and the screen probes' tracers that walk the structures
+/// (`CS_ScreenProbes_TraceRays_*_BVH_*`; the `Fallback` and `Voxels`
+/// tracers, which do not, stay).
+fn bvh_pass(container: &[u8]) -> bool {
+    let has = |name: &[u8]| container.windows(name.len()).any(|w| w == name);
+    if has(b"CSComputeSkinning") {
+        return true;
+    }
+    // The entry's name, as one run of bytes from its start.
+    const TRACE: &[u8] = b"CS_ScreenProbes_TraceRays_";
+    container.windows(TRACE.len()).enumerate().filter(|(_, w)| *w == TRACE).any(|(at, _)| {
+        let name: Vec<u8> = container[at..].iter().copied().take_while(|b| b.is_ascii_alphanumeric() || *b == b'_').collect();
+        let has_in = |part: &[u8]| name.windows(part.len()).any(|w| w == part);
+        has_in(b"_BVH") && !has_in(b"Fallback") && !has_in(b"Voxels")
+    })
+}
+
+/// `VICTORY_BVH_PASSES=0` (unset: run, as before): with no ray-tracing
+/// structures built (`VICTORY_BVH_BUILDER` not 1), [`bvh_pass`]es are left
+/// out, as `CS_RaytracingResolve` is: nothing reads what they make. After
+/// ZSlayerHQ/zslayer-pc-port-runtime #7 (an idea port): on an RTX 5070 the
+/// card's time a world frame went from 318 to 226 ms, the skinning with
+/// velocity (~37 ms) and one ray-binning tracer (32-38 ms) at the top before.
+/// What it risks: the indirect light of the screen probes is what the other
+/// tracers find alone; whether a skinning pass's output feeds anything but
+/// the structures was not compared in pictures there.
+fn bvh_passes_left_out() -> bool {
+    static OUT: OnceLock<bool> = OnceLock::new();
+    *OUT.get_or_init(|| {
+        std::env::var_os("VICTORY_BVH_PASSES").is_some_and(|v| v == "0")
+            && std::env::var_os("VICTORY_BVH_BUILDER").is_none_or(|v| v != "1")
+    })
+}
+
 fn left_out(shaders: &[Arc<Shader>]) -> Option<&'static str> {
+    if bvh_passes_left_out() && shaders.iter().any(|s| s.stage == "compute" && bvh_pass(&s.container)) {
+        return Some("feeds or walks the ray-tracing structures, none built (VICTORY_BVH_PASSES=0), left out");
+    }
     if !leave_out().is_empty() && shaders.iter().any(|s| leave_out().contains(&s.hash)) {
         return Some("named in VICTORY_LEAVE_OUT, left out");
     }
@@ -892,5 +932,30 @@ mod tests {
         assert!(Arc::ptr_eq(&queue.pop(false, 1).unwrap(), &ground));
         assert!(Arc::ptr_eq(&queue.pop(false, 1).unwrap(), &tree));
         assert!(Arc::ptr_eq(&queue.pop(false, 1).unwrap(), &decal));
+    }
+}
+
+#[cfg(test)]
+mod bvh_pass_tests {
+    use super::bvh_pass;
+
+    /// The skinning programs and the tracers that walk the structures; not
+    /// the fallback and voxel tracers, nor other programs.
+    #[test]
+    fn the_passes_of_the_structures_are_told_by_name() {
+        let with = |name: &str| [b"\0\x01junk ".as_slice(), name.as_bytes(), b"\0 more".as_slice()].concat();
+        assert!(bvh_pass(&with("CSComputeSkinningDefaultVelocity")));
+        assert!(bvh_pass(&with("CSComputeSkinningPedBlendShapesSecMotionVelocity")));
+        assert!(bvh_pass(&with("CS_ScreenProbes_TraceRays_RayBinning_BVH_Mixed_ShaderBinning_WithFar")));
+        assert!(bvh_pass(&with("CS_ScreenProbes_TraceRays_BVH_Opaque")));
+        assert!(!bvh_pass(&with("CS_ScreenProbes_TraceRays_Fallback_BVH")));
+        assert!(!bvh_pass(&with("CS_ScreenProbes_TraceRays_Voxels")));
+        assert!(!bvh_pass(&with("CS_ScreenProbes_ActivateRays")));
+        assert!(!bvh_pass(&with("CS_RaytracingResolve")));
+        // (The tracer's name ends where its run of name bytes ends: a BVH
+        // further on in the container is another name's.)
+        assert!(!bvh_pass(&[with("CS_ScreenProbes_TraceRays_Voxels"), with("CS_BVH_Refit")].concat()));
+        // Two tracers in one container: one that walks the structures is enough.
+        assert!(bvh_pass(&[with("CS_ScreenProbes_TraceRays_Voxels"), with("CS_ScreenProbes_TraceRays_BVH_X")].concat()));
     }
 }
