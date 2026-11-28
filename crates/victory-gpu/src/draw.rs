@@ -10,6 +10,42 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Direct dispatches of CS_DefragHeap_ComputeRelocations, the groups they named,
+/// and indirect dispatches whose group count is not known here.
+static DEFRAG_DISPATCHES: AtomicU64 = AtomicU64::new(0);
+static DEFRAG_GROUPS: AtomicU64 = AtomicU64::new(0);
+static DEFRAG_INDIRECT: AtomicU64 = AtomicU64::new(0);
+
+const DEFRAG_HASH: &str = "02384a60fda6f2d0";
+
+pub(crate) fn defrag_counts() -> (u64, u64, u64) {
+    (
+        DEFRAG_DISPATCHES.load(Ordering::Relaxed),
+        DEFRAG_GROUPS.load(Ordering::Relaxed),
+        DEFRAG_INDIRECT.load(Ordering::Relaxed),
+    )
+}
+
+fn note_defrag(p: &HostPipeline, groups: Option<u64>) {
+    // Counted only with the half-meet form on (`VICTORY_DEFRAG_HALF_MEETS=1`).
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("VICTORY_DEFRAG_HALF_MEETS").is_some_and(|v| v == "1")) {
+        return;
+    }
+    let Some(stage) = p.stages.first() else {
+        return;
+    };
+    if stage.shader.hash != DEFRAG_HASH {
+        return;
+    }
+    if let Some(groups) = groups {
+        DEFRAG_DISPATCHES.fetch_add(1, Ordering::Relaxed);
+        DEFRAG_GROUPS.fetch_add(groups, Ordering::Relaxed);
+    } else {
+        DEFRAG_INDIRECT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 use victory_shader::resource::RootIndexedView;
 use victory_shader::{ResourceType, RootType, UsedResource};
 
@@ -2212,6 +2248,17 @@ impl State {
                 }
             }
             for &(slot, param) in &stage.root_uavs {
+                if slot == victory_shader::emit::SLOT_MEET {
+                    if let Some(gpu) = crate::host::bind_defrag_counter(&list.list) {
+                        // SAFETY: an open list; the buffer lives for the process.
+                        unsafe {
+                            if compute {
+                                l.SetComputeRootUnorderedAccessView(param, gpu);
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if slot == victory_shader::emit::SLOT_FAULTS {
                     // Ours: where shaders note the pages they found empty.
                     if let Some(m) = &memory {
@@ -3841,6 +3888,7 @@ impl State {
                 unsafe { list.list.SetComputeRoot32BitConstant(param, threads[0], word) };
             }
         }
+        note_defrag(p, Some(u64::from(x) * u64::from(y) * u64::from(z)));
         // SAFETY: an open list with everything set.
         unsafe { list.list.Dispatch(x, y, z) };
         self.buffers_written();
@@ -5403,7 +5451,13 @@ impl State {
             let ran = match kind {
                 DRAW | INDEXED => self.prepare(list, kind == INDEXED),
                 MESH => self.prepare_for(list, false, true),
-                DISPATCH => self.bind(list, p, true),
+                DISPATCH => {
+                    let bound = self.bind(list, p, true);
+                    if bound {
+                        note_defrag(p, None);
+                    }
+                    bound
+                }
                 _ => false,
             };
             if !ran {

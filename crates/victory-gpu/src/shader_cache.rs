@@ -85,6 +85,7 @@ fn build() -> [u8; 32] {
             "VICTORY_WATER_TILE_SLOTS",
             "VICTORY_WAVE_LOOP_SKIPS",
             "VICTORY_WATER_PORTALS_WIDE",
+            "VICTORY_DEFRAG_HALF_MEETS",
             "VICTORY_THREAD_TICKET",
         ] {
             bytes.extend_from_slice(name.as_bytes());

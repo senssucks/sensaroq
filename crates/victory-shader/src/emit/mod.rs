@@ -124,8 +124,10 @@ pub use sampler::StaticSampler;
 pub use lower::{host_settings, set_host_max_wave, set_host_rdna};
 pub use rect::rect_list_gs;
 pub use shader::{
-    MEMORY_FAULTS, MEMORY_PAGES, MEMORY_READ_ONLY, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES,
-    SLOT_STRIDES_COUNT, SLOT_TABLE_STRIDES, USER_DATA_SPACE, VIEW_INTEGER, VIEW_SIGNED, VIEW_STRIDE_BITS, USER_DISPATCH_THREADS_X, USER_MEMORY_BASE, USER_ROOT_ADDRESS, USER_VIEW_ADDRESS, USER_VIEW_BIAS,
+    MEMORY_FAULTS, MEMORY_PAGES, MEMORY_READ_ONLY, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS,
+    SLOT_MEET, SLOT_MEMORY, SLOT_STRIDES, SLOT_STRIDES_COUNT, SLOT_TABLE_STRIDES,
+    USER_DATA_SPACE, VIEW_INTEGER, VIEW_SIGNED, VIEW_STRIDE_BITS, USER_DISPATCH_THREADS_X,
+    USER_MEMORY_BASE, USER_ROOT_ADDRESS, USER_VIEW_ADDRESS, USER_VIEW_BIAS,
     raw_views, set_raw_views, set_view_heap_limit, view_heap_limit,
 };
 
@@ -642,6 +644,16 @@ fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
     emit(&c, &native, &p, &st, &io, &res)
 }
 
+/// Meet sites the face-relocation compute emitted, or 0 before it is translated.
+pub fn defrag_meet_sites() -> u32 {
+    lower::meet_sites()
+}
+
+/// Shader LDS reads and writes that received their own half-meet.
+pub fn defrag_lds_sites() -> (u32, u32) {
+    lower::meet_lds_sites()
+}
+
 /// Emits a program whose earlier stages already ran.
 pub fn emit(
     c: &Container,
@@ -800,6 +812,20 @@ pub fn emit(
             || matches!(native.io, crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() == 128)
                 && c.digest == [0x50, 0xcf, 0x28, 0x32, 0x8b, 0x58, 0x05, 0x3d, 0xa8, 0x9a, 0x8d, 0xa0, 0x1a, 0xa1, 0x23, 0xc6];
         let wide_on = wide_option.as_ref().map_or(scene_kernel, |v| v == "1");
+        // CS_DefragHeap_ComputeRelocations: a group of two console waves. Its
+        // divergent LDS is read and written in one region, so it only lowers
+        // once that region is taken by both halves of a wave. With
+        // `VICTORY_DEFRAG_HALF_MEETS=1` (trustno1-coder #378, from
+        // DoubleGhosty/cool_fox; off by default here) the two halves of each
+        // console wave meet on their own and the other wave of the group does
+        // not wait (`with_half_meets`); otherwise both meet at group barriers
+        // ([`widen`]), as before. (`VICTORY_LEAVE_OUT` still drops it.)
+        let defrag = std::env::var_os("VICTORY_DEFRAG_HALF_MEETS").is_some_and(|v| v == "1")
+            && c.digest
+                == [
+                    0x50, 0xcf, 0x28, 0x32, 0x8b, 0x58, 0x05, 0x3d, 0xa8, 0x9a, 0x8d, 0xa0, 0x1a,
+                    0xa1, 0x23, 0xc6,
+                ];
         // A single guest wave can iterate an active-lane loop until both host
         // halves have finished. The precise latch and convergence conditions
         // for the driver compute route are checked by widen().
@@ -849,7 +875,11 @@ pub fn emit(
                     ];
                     let before = bases.into_iter().flatten().next();
                     for base in [kept.as_ref().map(|f| &f.0), before].into_iter().flatten() {
-                        let again = widen(c, native, base, why, driver_loop, wide_on);
+                        let again = if defrag {
+                            lower::with_half_meets(|| widen(c, native, base, why, driver_loop, wide_on))
+                        } else {
+                            widen(c, native, base, why, driver_loop, wide_on)
+                        };
                         report("wave-wide branches", &again);
                         if done(&again) {
                             return again.map(|(shader, _)| shader);
@@ -970,7 +1000,9 @@ fn widen(
         // (a program whose waves are the host's meets no one: no barrier, any group)
         crate::native::StageIo::Cs(_) if !(native.wave64 && lower::host_max_wave() == 32) => {}
         crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() == 64 => {}
-        crate::native::StageIo::Cs(cs) if groups && cs.threads.iter().product::<u32>() % 64 == 0 => {}
+        crate::native::StageIo::Cs(cs)
+            if groups && cs.threads.iter().product::<u32>() % 64 == 0
+                || lower::half_meets() && cs.threads.iter().product::<u32>() == 128 => {}
         crate::native::StageIo::Cs(cs) => {
             if why {
                 eprintln!("WAVE64-WIDE not tried: thread groups of {:?}", cs.threads);
@@ -982,6 +1014,7 @@ fn widen(
     // (several console waves to a group, each two host waves)
     let pairs = native.wave64
         && lower::host_max_wave() == 32
+        && !lower::half_meets()
         && matches!(native.io, crate::native::StageIo::Cs(cs) if cs.threads.iter().product::<u32>() > 64);
     let mut wide = std::collections::HashSet::new();
     loop {

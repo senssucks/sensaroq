@@ -66,6 +66,8 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [PR #328](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/328) | Ray walkers reuse a 64 KiB page's lookup (`VICTORY_MEMORY_NEAR`, off by default here), from fxceless 299fba | wike1701 |
 | [PR #326](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/326) | Water tile slots a lane on 32-lane cards, scalar loop skips kept, one more water program wave-wide (`VICTORY_WATER_TILE_SLOTS`, `VICTORY_WAVE_LOOP_SKIPS`, `VICTORY_WATER_PORTALS_WIDE`, all off by default here) | wike1701 |
 | [PR #358](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/358) | Independent card maintenance jobs batched (`VICTORY_MAINTENANCE_BATCHES`, off by default) | krofty |
+| [PR #378](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/378) | Face relocation (decal defrag, 02384a60fda6f2d0): each console wave's two halves meet on their own, no group barrier (`VICTORY_DEFRAG_HALF_MEETS`, off by default here), from DoubleGhosty/cool_fox (Davidjc13) | liuhVIP |
+| [PR #77](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/77) | Audio DSP mono convolutions: TVs, phone calls and reverb heard (`VICTORY_DSP_CONVOLVE`, off by default here; `VICTORY_DSP_GAIN`), same as fxceless #1491 | Omnicrash |
 
 ### stellarr-studio/kelvaroq (native patches)
 
