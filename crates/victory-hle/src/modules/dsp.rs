@@ -29,6 +29,10 @@ mod convolve;
 
 /// Whether mono convolutions are computed (only with `VICTORY_DSP_CONVOLVE=1`).
 fn convolve_on() -> bool {
+    // (The tests drive the computed path.)
+    if cfg!(test) {
+        return true;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_DSP_CONVOLVE").is_some_and(|v| v == "1"))
 }
