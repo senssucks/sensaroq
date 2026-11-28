@@ -3370,7 +3370,7 @@ static PLACED_RAW: std::sync::Mutex<std::collections::BTreeSet<(u64, [u32; 14])>
 static PLACED_TWINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// See [`PLACED_TWINS`].
-#[cfg(windows)]
+#[cfg(all(windows, feature = "diagnostics"))]
 pub(crate) fn placed_filler_twins() -> u64 {
     PLACED_TWINS.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -5272,10 +5272,6 @@ void main(uint3 id : SV_DispatchThreadID) {
         // Packed texels: 9-bit mantissas, a shared exponent.
         let packed: Vec<u32> =
             (0..W * W).map(|i| (i * 7 % 512) | (i * 13 % 512) << 9 | (i * 29 % 512) << 18 | (12 + i % 8) << 27).collect();
-        let decode = |p: u32| {
-            let scale = 2f32.powi((p >> 27) as i32 - 15 - 9);
-            [p & 511, p >> 9 & 511, p >> 18 & 511].map(|m| m as f32 * scale)
-        };
         const PITCH: u32 = 256;
         let (upload, data) = host.upload_buffer(u64::from(PITCH * W)).unwrap();
         for (i, &p) in packed.iter().enumerate() {

@@ -2335,6 +2335,8 @@ mod tests {
             lane_now: [0; 3],
             done: Default::default(),
             refused: 0,
+            failed: 0,
+            slowest: Default::default(),
             bcpack: Default::default(),
             since: None,
         }

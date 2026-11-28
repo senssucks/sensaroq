@@ -4351,6 +4351,8 @@ mod card_steps;
 mod maintenance;
 #[cfg(all(test, feature = "diagnostics"))]
 mod maintenance_tests;
+// (Read by the removed-device report of diagnostics builds alone.)
+#[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
 pub(crate) mod indirects;
 mod font;
 mod menu;
@@ -9141,7 +9143,9 @@ enum Touch {
     Refresh(usize, usize, usize),
     /// The copy is given to shaders.
     Write(usize),
-    /// Title memory is written.
+    /// Title memory is written. (Made by the tests alone: the steps that
+    /// write title memory end the walk before it is made.)
+    #[cfg_attr(not(test), allow(dead_code))]
     Title,
     Nothing,
     /// Another part of the submission begins.

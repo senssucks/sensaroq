@@ -107,6 +107,7 @@ struct State {
 
 /// What a present with `waiting` draws gone without their pipeline since
 /// the last does next, at `now`: whether it is covered.
+#[cfg(test)]
 fn step(s: &mut State, waiting: u64, threshold: u64, longest: Duration, now: Instant) -> bool {
     step_with(s, waiting, threshold, longest, now, QUIET)
 }
