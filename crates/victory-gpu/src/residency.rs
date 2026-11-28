@@ -26,6 +26,35 @@ pub(crate) fn allocation_error(error: &windows::core::Error) {
     }
 }
 
+/// A buffer the system refused for want of memory (E_OUTOFMEMORY): at most
+/// once every two seconds, the memory as the system counts it then, in one
+/// line beside the refusal. Session 36 had 1,500 such refusals (07:22) with
+/// commit and the shared budget both far from full and no memory line near
+/// them, so which limit it was could not be told.
+pub(crate) fn refused_for_memory(error: &windows::core::Error, kind: &str, size: u64) {
+    if error.code() != windows::Win32::Foundation::E_OUTOFMEMORY {
+        return;
+    }
+    static REFUSED: AtomicU64 = AtomicU64::new(0);
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let refused = REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
+    let now = crate::host::coarse_ms();
+    let next = NEXT.load(Ordering::Relaxed);
+    if now < next || NEXT.compare_exchange(next, now + 2000, Ordering::Relaxed, Ordering::Relaxed).is_err() {
+        return;
+    }
+    let (ram_free, commit_free, commit_all) =
+        memory_status().map_or((0, 0, 0), |m| (m.ullAvailPhys / MIB, m.ullAvailPageFile / MIB, m.ullTotalPageFile / MIB));
+    let card = crate::host::host().and_then(|h| h.video_memory_groups()).unwrap_or_default();
+    tracing::warn!(
+        "a {kind} buffer of {size} bytes refused for want of memory ({refused} such refusals since the start); then: the card's own memory budget {} MB, in use {} MB; the PC's shared with the card budget {} MB, in use {} MB; RAM free {ram_free} MB; commit free {commit_free} of {commit_all} MB",
+        card[0][0] / MIB,
+        card[0][1] / MIB,
+        card[1][0] / MIB,
+        card[1][1] / MIB,
+    );
+}
+
 thread_local! {
     static STAGING_DEFERRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }

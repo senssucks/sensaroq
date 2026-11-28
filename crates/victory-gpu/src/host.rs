@@ -1519,6 +1519,8 @@ pub(crate) struct HostList {
     indirect_run: Mutex<Option<(crate::indirect::merge::Run, Option<crate::indirect::merge::Held>)>>,
     /// Whether an execution is held back.
     holding: std::sync::atomic::AtomicBool,
+    /// Whether this recording has any `Step::Placed` copy (`place::HostList::place_constant`).
+    has_placed: std::sync::atomic::AtomicBool,
     /// The upscaling (`crate::streamline`) recorded in the list, noted for
     /// the present after its submission; 0 for none.
     upscale: std::sync::atomic::AtomicU64,
@@ -2847,6 +2849,12 @@ struct Deferred {
     /// indirect arguments; 0 if none. It stays readable until the next
     /// clamp into it ([`HostList::indirect_state`]).
     indirect_readable: usize,
+    /// Ranges `[dst, dst + len)` written on the GPU by `Step::Placed` in
+    /// this recording, in order, with the destination host copy.
+    placed_written: Vec<(usize, usize, std::sync::Arc<crate::shadow::Shadow>)>,
+    /// Current per-recording GPU buffer `(buffer, capacity, used)` for
+    /// inline placed constant snapshots ([`place`]).
+    placed_cbv: Option<(ID3D12Resource, u64, u64)>,
 }
 
 impl Deferred {
@@ -4656,12 +4664,15 @@ fn late_line(frames: f64) {
     crate::land::log(frames);
     if place::on() {
         let t: Vec<f64> = place::STATS.iter().map(|r| r.swap(0, Ordering::Relaxed) as f64 / frames).collect();
+        let constants = place::CONSTANTS.swap(0, Ordering::Relaxed) as f64 / frames;
         tracing::info!(
-            "title buffer copies at their place in the lists, per frame (VICTORY_COPIES_IN_PLACE): {:.1} of {:.1} KB, {:.1} of them out              of what shaders wrote; {:.2} copies into textures out of what shaders wrote",
+            "title buffer copies at their place in the lists, per frame (VICTORY_COPIES_IN_PLACE): {:.1} of {:.1} KB, {:.1} of them out \
+             of what shaders wrote; {:.2} copies into textures out of what shaders wrote; {:.1} constants read in place",
             t[0],
             t[1] / 1024.0,
             t[2],
             t[3],
+            constants,
         );
     }
     card_steps::log(frames);
@@ -5181,6 +5192,7 @@ impl Host {
                 title_calls: std::sync::atomic::AtomicU64::new(0),
                 indirect_run: Mutex::default(),
                 holding: std::sync::atomic::AtomicBool::new(false),
+                has_placed: std::sync::atomic::AtomicBool::new(false),
                 upscale: std::sync::atomic::AtomicU64::new(0),
                 hudless: std::sync::atomic::AtomicU64::new(0),
                 left_open: [const { std::sync::atomic::AtomicU64::new(0) }; 2],
@@ -7778,6 +7790,7 @@ impl HostList {
         let left_open = self.still_left_open();
         self.changed_something();
         self.holding.store(false, Ordering::Relaxed);
+        self.has_placed.store(false, Ordering::Relaxed);
         *self.indirect_run.lock().unwrap_or_else(|e| e.into_inner()) = None;
         #[cfg(feature = "diagnostics")]
         let started = std::time::Instant::now();
@@ -8415,6 +8428,8 @@ impl HostList {
     /// Copies `len` bytes from `src` to `dst` when the list is submitted.
     pub(crate) fn defer_copy(&self, dst: *mut u8, src: *const u8, len: usize) {
         let mut deferred = self.deferred();
+        let copy_dst = dst as usize;
+        deferred.placed_written.retain(|(a, b, _)| *b <= copy_dst || *a >= copy_dst.saturating_add(len));
         COPIES_JOINED[0].fetch_add(1, Ordering::Relaxed);
         // A copy that goes on where the one recorded just before it ended,
         // source and destination both: with `join_copies` the two are one
@@ -10515,6 +10530,7 @@ impl Host {
             Ok(()) => buffer,
             Err(e) => {
                 tracing::warn!(error = %e, size, "no read-back buffer");
+                crate::residency::refused_for_memory(&e, "read-back", size);
                 None
             }
         }
@@ -10573,10 +10589,90 @@ impl Host {
             Err(e) => {
                 crate::residency::allocation_error(&e);
                 tracing::warn!(error = %e, size, "no upload buffer");
+                crate::residency::refused_for_memory(&e, "upload", size);
                 None
             }
         }
     }
+}
+
+/// `VICTORY_MEMORY_MAP=1` (off by default): beside the process memory line,
+/// a walk of the address space that says where the private memory lies.
+/// Session 36's private memory went from 25 GB to 35 GB in 45 minutes on a
+/// 32 GB machine, and the lines of ours account for some 2.5 GB of it
+/// (windows); this tells the title's own memory, below 1 TiB, from ours and
+/// the driver's above it and below 4 GiB, and names the largest regions and
+/// what grew since the last walk. A walk takes a few milliseconds.
+fn memory_map() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_MEMORY_MAP").is_some_and(|v| v == "1"))
+}
+
+/// One walk for [`memory_map`], logged.
+fn memory_map_line() {
+    use std::collections::BTreeMap;
+    use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, VirtualQuery};
+    const MB: usize = 1 << 20;
+    const LOW: usize = 1 << 32;
+    const TITLE_END: usize = 1 << 40;
+    // Committed bytes by allocation base: private regions only.
+    let mut by_base: BTreeMap<usize, usize> = BTreeMap::new();
+    // [below 4 GiB, the title's (4 GiB to 1 TiB), above 1 TiB] private;
+    // then mapped (sections, all places) and image.
+    let mut sums = [0usize; 5];
+    let mut at = 0usize;
+    let started = std::time::Instant::now();
+    loop {
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: a query of our own address space into a sized structure.
+        let got = unsafe { VirtualQuery(at as *const _, &mut info, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
+        if got == 0 || info.RegionSize == 0 {
+            break;
+        }
+        let (base, size) = (info.BaseAddress as usize, info.RegionSize);
+        if info.State == MEM_COMMIT {
+            if info.Type == MEM_PRIVATE {
+                let place = if base < LOW { 0 } else if base < TITLE_END { 1 } else { 2 };
+                sums[place] += size;
+                *by_base.entry(info.AllocationBase as usize).or_default() += size;
+            } else if info.Type == MEM_MAPPED {
+                sums[3] += size;
+            } else if info.Type == MEM_IMAGE {
+                sums[4] += size;
+            }
+        }
+        let Some(next) = base.checked_add(size) else { break };
+        at = next;
+    }
+    static LAST: Mutex<BTreeMap<usize, usize>> = Mutex::new(BTreeMap::new());
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut largest: Vec<(usize, usize)> = by_base.iter().map(|(&b, &n)| (b, n)).collect();
+    largest.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    let mut grew: Vec<(usize, isize)> = by_base
+        .iter()
+        .map(|(&b, &n)| (b, n as isize - last.get(&b).copied().unwrap_or(0) as isize))
+        .filter(|&(_, d)| d != 0)
+        .collect();
+    grew.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    let gone: usize = last.iter().filter(|(b, _)| !by_base.contains_key(b)).map(|(_, &n)| n).sum();
+    let new_bases = by_base.keys().filter(|b| !last.contains_key(b)).count();
+    let fmt = |v: &[(usize, usize)]| v.iter().take(8).map(|(b, n)| format!("{b:#x} {} MB", n / MB)).collect::<Vec<_>>().join(", ");
+    let fmt_grew = |v: &[(usize, isize)]| v.iter().take(8).map(|(b, d)| format!("{b:#x} {:+} MB", d / MB as isize)).collect::<Vec<_>>().join(", ");
+    tracing::info!(
+        "where the private memory lies (VICTORY_MEMORY_MAP): below 4 GiB {} MB, the title's (4 GiB to 1 TiB) {} MB, above 1 TiB (ours, the driver's) {} MB, in {} allocations; mapped (sections) {} MB, images {} MB; the largest: {}; grew most since the last walk: {}; {} allocations new, {} MB in ones gone; walked in {:.1} ms",
+        sums[0] / MB,
+        sums[1] / MB,
+        sums[2] / MB,
+        by_base.len(),
+        sums[3] / MB,
+        sums[4] / MB,
+        fmt(&largest),
+        fmt_grew(&grew),
+        new_bases,
+        gone / MB,
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    *last = by_base;
 }
 
 /// The swap chain formats a presented texture can be copied into: its own
@@ -10823,6 +10919,9 @@ impl Meter {
                             crate::shadow::SIDES_MADE[0].load(Ordering::Relaxed),
                             crate::shadow::SIDES_MADE[1].load(Ordering::Relaxed) >> 20
                         );
+                        if memory_map() {
+                            memory_map_line();
+                        }
                         let [n, bytes, asked, carded] = crate::shadow::window_room();
                         let [card, before] = [0, 1].map(|i| crate::shadow::CARD_BYTES[i].load(Ordering::Relaxed));
                         tracing::info!(
@@ -11877,6 +11976,7 @@ impl Host {
             Ok(()) => Some((buffer?, data.cast())),
             Err(e) => {
                 tracing::warn!(error = %e, size, "no shared buffer");
+                crate::residency::refused_for_memory(&e, "shared", size);
                 None
             }
         }
@@ -12054,6 +12154,7 @@ impl Host {
             Ok(()) => buffer,
             Err(e) => {
                 tracing::warn!(error = %e, size, "no unordered-access buffer");
+                crate::residency::refused_for_memory(&e, "unordered-access", size);
                 None
             }
         }
