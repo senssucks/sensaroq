@@ -180,7 +180,11 @@ foreach ($k in $menu.Keys) {
 }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 foreach ($pair in ($Set -split ';')) {
-    if ($pair -match '^\s*([^=]+?)\s*=(.*)$') { $settings[$Matches[1]] = $Matches[2].Trim() }
+    # NAME=- leaves NAME out, also where the script itself would set it (VICTORY_FRAMEGEN=- for frame generation not
+    # made ready at all, as -NoFrameGenReady does, from the settings file alone).
+    if ($pair -match '^\s*([^=]+?)\s*=(.*)$') {
+        if ($Matches[2].Trim() -eq '-') { $settings.Remove($Matches[1]) } else { $settings[$Matches[1]] = $Matches[2].Trim() }
+    }
 }
 $console = if ($SeriesS) { 'series-s' } else { 'series-x' }
 # For the menu: what it shows as the current choices, where it saves, and how it starts the game again
