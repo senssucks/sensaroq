@@ -670,11 +670,14 @@ pub(super) fn cut_for(runs: &[&HostList]) -> Option<usize> {
     if first + 1 == runs.len() {
         return None;
     }
+    let at = std::time::Instant::now();
     let written = line().written.clone();
     blocked_by(&written, runs, false)?;
     let (does, steps, _) = does_of(&written, runs);
     let mut behind = None;
-    if plan(&does, stage(), true, &mut behind) != Err(BEHIND_PLACED) {
+    let behind_placed = plan(&does, stage(), true, &mut behind) == Err(BEHIND_PLACED);
+    plan_ns(6, at);
+    if !behind_placed {
         return None;
     }
     let (placed, reader) = behind?;
@@ -1020,6 +1023,17 @@ static POOL: Mutex<Vec<Own>> = Mutex::new(Vec::new());
 /// Since the last frame-rate line: fills and copies done on the card, their
 /// bytes, submissions that waited instead, refused by a check, and fills done
 /// on the card out of a copy's source ([`forward`]).
+/// Nanoseconds of the planning, by part, since the last frame-rate line:
+/// what the steps do, the plan, what holds their bytes, the list, the slots,
+/// the copy-or-not check of [`Host::card_steps`], and [`cut_for`].
+static PLAN_NS: [std::sync::atomic::AtomicU64; 7] = [const { std::sync::atomic::AtomicU64::new(0) }; 7];
+
+fn plan_ns(part: usize, from: std::time::Instant) -> std::time::Instant {
+    let now = std::time::Instant::now();
+    PLAN_NS[part].fetch_add((now - from).as_nanos() as u64, Ordering::Relaxed);
+    now
+}
+
 static DONE: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
 
 /// What [`Host::card_steps`] took off a submission: the list that does it,
@@ -1075,8 +1089,12 @@ impl Host {
             }
             (line.written.clone(), copies(&line))
         };
-        blocked_by(&written, runs, false)?;
-        let taken = if copied_read(&copies, runs) {
+        let at = std::time::Instant::now();
+        let blocked = blocked_by(&written, runs, false);
+        let copied = blocked.is_some() && copied_read(&copies, runs);
+        plan_ns(5, at);
+        blocked?;
+        let taken = if copied {
             Err("a copy done on the card is read through another host copy")
         } else {
             self.take_steps(&written, runs)
@@ -1095,8 +1113,12 @@ impl Host {
 
     fn take_steps(&self, written: &[(usize, usize)], runs: &[&HostList]) -> Result<Option<Taken>, &'static str> {
         let mut spent = crate::timeline::span("steps on the card: chosen");
+        let at = std::time::Instant::now();
         let (does, steps, moved) = does_of(written, runs);
-        let chosen = plan(&does, stage(), placed_order() || forward_on(), &mut None)?;
+        let at = plan_ns(0, at);
+        let chosen = plan(&does, stage(), placed_order() || forward_on(), &mut None);
+        let at = plan_ns(1, at);
+        let chosen = chosen?;
         if chosen.is_empty() {
             return Ok(None);
         }
@@ -1197,6 +1219,7 @@ impl Host {
             });
         }
         spent.next("steps on the card: the list");
+        let at = plan_ns(2, at);
         let Some(own) = self.own_list(end) else {
             return Err("no host list or buffer for it");
         };
@@ -1250,6 +1273,7 @@ impl Host {
         // SAFETY: a live buffer.
         let gpu = unsafe { own.between.GetGPUVirtualAddress() };
         spent.next("steps on the card: the slots");
+        let at = plan_ns(3, at);
         // (11,000 slots a frame in a street, two descriptors each: on
         // several threads, a slot always on the same one, in the steps'
         // order.)
@@ -1264,6 +1288,7 @@ impl Host {
                 }
             }
         });
+        plan_ns(4, at);
         let copies = ops.iter().filter(|op| matches!(op.to, To::Copy(..))).count();
         DONE[0].fetch_add((ops.len() - copies) as u64, Ordering::Relaxed);
         DONE[1].fetch_add(copies as u64, Ordering::Relaxed);
@@ -1343,6 +1368,20 @@ pub(super) fn log(frames: f64) {
         d[3],
         d[4],
         u8::from(forward_on()),
+    );
+    let t: Vec<f64> = PLAN_NS.iter().map(|t| t.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames).collect();
+    tracing::info!(
+        "planning steps done on the card, per frame, ms: {:.2} what the steps do, {:.2} the plan, {:.2} what holds their \
+         bytes (VICTORY_HOLDER_INDEX={}), {:.2} the list, {:.2} the slots, {:.2} the checks first, {:.2} where to cut a \
+         submission",
+        t[0],
+        t[1],
+        t[2],
+        u8::from(holder_index_on()),
+        t[3],
+        t[4],
+        t[5],
+        t[6],
     );
     let r: Vec<f64> = RECORDED.iter().map(|r| r.swap(0, Ordering::Relaxed) as f64 / frames).collect();
     tracing::info!(
