@@ -222,8 +222,9 @@ const ALPHA_BOUND: f32 = 1.0;
 fn parse_alpha(set: &str) -> Alpha {
     let set = set.trim();
     match set {
-        "" | "bound" => Alpha::Bound(ALPHA_BOUND),
-        "0" | "off" | "title" => Alpha::Title,
+        // Unset: the title's sky light, as before (off by default here).
+        "" | "0" | "off" | "title" => Alpha::Title,
+        "bound" => Alpha::Bound(ALPHA_BOUND),
         "1" | "estimate" => Alpha::Estimate,
         _ => set
             .strip_prefix("bound:")
@@ -233,10 +234,11 @@ fn parse_alpha(set: &str) -> Alpha {
     }
 }
 
-/// `VICTORY_AMBIENT_SPECULAR_ALPHA`: unset or `bound[:<multiple>]`, the
-/// alpha layer keeps the title's sky light up to that multiple (1) of the
-/// light around; `1`: it takes the estimate as opaque surfaces do; `0`: it
-/// is left as the title has it.
+/// `VICTORY_AMBIENT_SPECULAR_ALPHA` (trustno1-coder #63 and #393; off by
+/// default here): `bound[:<multiple>]`, the alpha layer keeps the title's
+/// sky light up to that multiple (1) of the light around; `1`: it takes the
+/// estimate as opaque surfaces do; unset or `0`: it is left as the title has
+/// it, as before.
 ///
 /// The alpha layer's rays that find nothing take the sky's light twice over:
 /// from `CS_DeferredFallbacksAlpha_SkyProbe` and from `CS_RayMiss`, into one
@@ -266,13 +268,15 @@ const OPAQUE_BOUND: f32 = 1.0;
 fn parse_opaque_bound(set: &str, share: f32) -> Option<f32> {
     let set = set.trim();
     match set {
-        "0" | "off" => None,
+        // Unset: no bound, as before (off by default here).
+        "" | "0" | "off" => None,
         _ => Some(set.parse::<f32>().ok().filter(|k| k.is_finite() && *k > 0.0).unwrap_or(OPAQUE_BOUND) * share),
     }
 }
 
-/// `VICTORY_AMBIENT_SPECULAR_NO_DEPTH=<multiple>` (1 unless set; `0`: the
-/// title's sky light): what the opaque layer's reflections that found
+/// `VICTORY_AMBIENT_SPECULAR_NO_DEPTH=<multiple>` (off by default here:
+/// unset or `0`, the title's sky light, as before; any other value that is
+/// not a number, 1): what the opaque layer's reflections that found
 /// nothing keep of the sky's light where the estimate cannot be made, as a
 /// multiple of the light around (as the alpha layer's bound: the same
 /// program, the same measure of the light around).
@@ -1232,7 +1236,7 @@ mod tests {
 
     #[test]
     fn alpha_layer_settings() {
-        assert_eq!(parse_alpha(""), Alpha::Bound(ALPHA_BOUND));
+        assert_eq!(parse_alpha(""), Alpha::Title);
         assert_eq!(parse_alpha("bound"), Alpha::Bound(ALPHA_BOUND));
         assert_eq!(parse_alpha(" bound:2.5 "), Alpha::Bound(2.5));
         assert_eq!(parse_alpha("bound:0"), Alpha::Bound(ALPHA_BOUND));
@@ -1244,7 +1248,7 @@ mod tests {
 
     #[test]
     fn opaque_layer_without_depth() {
-        assert_eq!(parse_opaque_bound("", 1.0), Some(OPAQUE_BOUND));
+        assert_eq!(parse_opaque_bound("", 1.0), None);
         assert_eq!(parse_opaque_bound("x", 0.5), Some(OPAQUE_BOUND * 0.5));
         assert_eq!(parse_opaque_bound(" 2 ", 0.5), Some(1.0));
         assert_eq!(parse_opaque_bound("0", 1.0), None);
