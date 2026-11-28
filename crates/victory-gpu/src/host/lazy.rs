@@ -52,6 +52,27 @@ fn hot_life() -> u8 {
     *N.get_or_init(|| std::env::var("VICTORY_LAZY_HOT").ok().and_then(|v| v.trim().parse().ok()).filter(|&n| n > 0).unwrap_or(64))
 }
 
+/// Whether a piece once found written stays counted as written lately for
+/// good (`VICTORY_LAZY_STICKY=1`, off by default). Without it a piece goes
+/// cold after `VICTORY_LAZY_HOT` compares that found nothing new: a buffer
+/// the card rewrites with the same values for a while (water heights at
+/// rest, a history target) went cold, and its next real change reached
+/// title memory only when the sweep came by, and with `VICTORY_LAZY_NARROW`
+/// nothing waited for it (s39: boats and the swimmer flew, trails in water,
+/// grainy shade). Sticky, what the card ever wrote is compared every
+/// submission, as without the switch; only pieces it never wrote are left
+/// to the sweep. At most the whole copy, i.e. no worse than the switch off.
+fn sticky() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_LAZY_STICKY").is_some_and(|v| v == "1");
+        if on {
+            tracing::info!("pieces of big card copies found written once are compared every time (VICTORY_LAZY_STICKY)");
+        }
+        on
+    })
+}
+
 fn sweep_len() -> usize {
     static N: OnceLock<usize> = OnceLock::new();
     *N.get_or_init(|| std::env::var("VICTORY_LAZY_SWEEP").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(128))
@@ -261,6 +282,7 @@ pub(super) fn sweep(shadow: &Shadow) -> Vec<CardSpan> {
 /// A compared piece of the copy was found written (`flagged`) or not.
 pub(super) fn found(shadow: &Shadow, span: &CardSpan, flagged: impl Fn(u32) -> bool) {
     let life = hot_life();
+    let sticky = sticky();
     let mut hits = 0;
     with(shadow, |state| {
         for i in 0..span.pieces {
@@ -271,7 +293,7 @@ pub(super) fn found(shadow: &Shadow, span: &CardSpan, flagged: impl Fn(u32) -> b
             if flagged(i) {
                 *hot = life;
                 hits += 1;
-            } else {
+            } else if !(sticky && *hot > 0) {
                 *hot = hot.saturating_sub(1);
             }
         }
