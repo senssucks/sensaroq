@@ -134,7 +134,23 @@ fn bvh_passes_left_out() -> bool {
     })
 }
 
+/// With `VICTORY_RT_MISS=1` ([`victory_shader::emit::rt_miss`]) and no
+/// structure builder: the title's ray-only skinning programs
+/// (`CSComputeSkinning*`) are left out too (`VICTORY_RT_SKIN=1` runs them).
+/// trustno1-coder/VIctory-NVIDIA #619, from edsuuu/VI-BR-PORT.
+fn rt_skinning_left_out() -> bool {
+    static OUT: OnceLock<bool> = OnceLock::new();
+    *OUT.get_or_init(|| {
+        victory_shader::emit::rt_miss()
+            && std::env::var_os("VICTORY_BVH_BUILDER").is_none_or(|v| v != "1")
+            && std::env::var_os("VICTORY_RT_SKIN").is_none_or(|v| v != "1")
+    })
+}
+
 fn left_out(shaders: &[Arc<Shader>]) -> Option<&'static str> {
+    if rt_skinning_left_out() && named(shaders, b"CSComputeSkinning") {
+        return Some("skins into the ray-tracing structures, none built and every ray a miss (VICTORY_RT_MISS=1; VICTORY_RT_SKIN=1 runs it), left out");
+    }
     if bvh_passes_left_out() && shaders.iter().any(|s| s.stage == "compute" && bvh_pass(&s.container)) {
         return Some("feeds or walks the ray-tracing structures, none built (VICTORY_BVH_PASSES=0), left out");
     }

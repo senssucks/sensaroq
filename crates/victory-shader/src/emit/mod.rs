@@ -345,6 +345,25 @@ pub fn memory_near() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_MEMORY_NEAR").is_some_and(|v| v == "1"))
 }
 
+/// Whether the ray-tracing node test answers "nothing hit" for every node
+/// (`VICTORY_RT_MISS=1`; off by default): a box node's four children are
+/// none and a triangle node is a miss, so every traversal ends at its root.
+/// From edsuuu/VI-BR-PORT (GPL-3.0), via trustno1-coder/VIctory-NVIDIA #619.
+///
+/// For runs without the structure builder (ours): the title's local-light
+/// shadow rays then hit nothing (lit, as with no occluder), its reflection
+/// and probe rays reach the sky, and the trace programs cost next to nothing
+/// on the card. The sun's near shadows are the title's cascades and stay.
+/// The source reports 4.3-5.6 to 6.6-9.7 fps in the world (Series S
+/// settings, builder off).
+///
+/// Part of the translation: the shader cache keys on it (`victory-gpu`'s
+/// does).
+pub fn rt_miss() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_RT_MISS").is_some_and(|v| v == "1"))
+}
+
 /// Whether the structure builder's accesses through its root views stay near
 /// them, and a size in a structure's header that cannot be one counts as none
 /// (`VICTORY_BVH_BOUNDS=0`: neither). Part of the translation: the shader

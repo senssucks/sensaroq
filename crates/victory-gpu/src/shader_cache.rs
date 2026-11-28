@@ -81,6 +81,7 @@ fn build() -> [u8; 32] {
             "VICTORY_MESH_OUTPUT_STRICT",
             "VICTORY_BVH_FENCES",
             "VICTORY_BVH_BOUNDS",
+            "VICTORY_RT_MISS",
             "VICTORY_MEMORY_NEAR",
             "VICTORY_WATER_TILE_SLOTS",
             "VICTORY_WAVE_LOOP_SKIPS",
