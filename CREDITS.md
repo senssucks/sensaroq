@@ -68,6 +68,7 @@ Each change is in sensaroq's history with the source commit or pull request it c
 | [PR #358](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/358) | Independent card maintenance jobs batched (`VICTORY_MAINTENANCE_BATCHES`, off by default) | krofty |
 | [PR #378](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/378) | Face relocation (decal defrag, 02384a60fda6f2d0): each console wave's two halves meet on their own, no group barrier (`VICTORY_DEFRAG_HALF_MEETS`, off by default here), from DoubleGhosty/cool_fox (Davidjc13) | liuhVIP |
 | [PR #77](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/77) | Audio DSP mono convolutions: TVs, phone calls and reverb heard (`VICTORY_DSP_CONVOLVE`, off by default here; `VICTORY_DSP_GAIN`), same as fxceless #1491 | Omnicrash |
+| [PR #63](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/63), [PR #393](https://github.com/trustno1-coder/VIctory-NVIDIA/pull/393) | The sky's light in reflections bounded by the light around where the miss program has no depth (glossy eyes, glass and floors indoors; `VICTORY_AMBIENT_SPECULAR_ALPHA=bound`, `VICTORY_AMBIENT_SPECULAR_NO_DEPTH=1`, off by default here) | wasonidas, tippythetaidum |
 
 ### stellarr-studio/kelvaroq (native patches)
 
