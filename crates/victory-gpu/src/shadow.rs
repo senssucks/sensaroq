@@ -520,6 +520,28 @@ fn default_window_card_mb(local_vram_budget: Option<u64>) -> u64 {
     }
 }
 
+/// How full the card may be, in hundredths of its budget, for a window to
+/// go to its memory ([`window_room_for`], [`window_mapped_for`]):
+/// `VICTORY_WINDOW_CARD_LINE` (unset: 80, as before; read from 50 to 95).
+///
+/// At 80 the windows lose to textures, whose line is near 95 (`resource::room_line`):
+/// in session 32 (RTX 5060 Ti, budget 14,809 MB) the card held 11.3-12.1 GB,
+/// over the 11,847 MB line, so 1,140 of 2,312 windows were on the card (1,271 of
+/// 2,048 MB) and the rest, some 1.8 GB that draws take vertices, indices and
+/// constants from, stayed in the PC's memory, read over a PCIe 3.0 x8 bus, while
+/// 2.7 GB of the card were free. (fxceless/victory-fork #1184 saw a pass go from
+/// 12 to 160 ms when the card's memory was overfilled instead: the line stays
+/// under the textures', so they keep room of their own.)
+fn window_line(budget: u64) -> u64 {
+    static PERCENT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    budget / 100 * *PERCENT.get_or_init(|| window_line_percent(std::env::var("VICTORY_WINDOW_CARD_LINE").ok().as_deref()))
+}
+
+/// The hundredths of [`window_line`] a `VICTORY_WINDOW_CARD_LINE` value says.
+fn window_line_percent(value: Option<&str>) -> u64 {
+    value.and_then(|v| v.trim().parse::<u64>().ok()).map_or(80, |p| p.clamp(50, 95))
+}
+
 /// Bytes alive of windows' card sides ([`window_card_most`]).
 pub(crate) static WINDOW_CARD_BYTES: AtomicU64 = AtomicU64::new(0);
 
@@ -570,7 +592,7 @@ fn window_mapped_for(size: u64) -> Option<(ID3D12Resource, *mut u8)> {
     }
     let host = host()?;
     if let Some([budget, used, ..]) = host.video_memory()
-        && used + size > budget / 10 * 8
+        && used + size > window_line(budget)
     {
         return None;
     }
@@ -606,7 +628,7 @@ fn window_room_for(size: u64) -> Option<ID3D12Resource> {
         return None;
     }
     if let Some([budget, used, ..]) = host.video_memory()
-        && used + size > budget / 10 * 8
+        && used + size > window_line(budget)
     {
         return None;
     }
@@ -6437,5 +6459,24 @@ mod wide_chunk_tests {
             });
             assert!(worked.iter().all(|w| w.load(Ordering::Relaxed) == 1), "n {n}, single {single}, chunk {chunk}");
         }
+    }
+}
+
+#[cfg(test)]
+mod window_line_tests {
+    use super::window_line_percent;
+
+    #[test]
+    fn the_window_line_is_read_in_hundredths_and_held_in_bounds() {
+        assert_eq!(window_line_percent(None), 80);
+        assert_eq!(window_line_percent(Some("")), 80);
+        assert_eq!(window_line_percent(Some("x")), 80);
+        assert_eq!(window_line_percent(Some(" 90 ")), 90);
+        assert_eq!(window_line_percent(Some("99")), 95);
+        assert_eq!(window_line_percent(Some("10")), 50);
+        // Session 32's card: 1.8 GB of windows fit under a line of 90.
+        let budget = 14_809u64 << 20;
+        assert!(12_100u64 << 20 > budget / 100 * 80);
+        assert!((12_100u64 << 20) + (1_800 << 20) < budget / 100 * 95);
     }
 }
