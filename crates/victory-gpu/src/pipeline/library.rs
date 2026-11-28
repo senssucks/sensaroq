@@ -956,7 +956,7 @@ mod tests {
                     looked.set(true);
                     Err(windows::core::Error::empty())
                 },
-                || Err(windows::core::Error::empty()),
+                |_| Err(windows::core::Error::empty()),
             );
             assert!(made.is_err());
             assert!(!looked.get(), "the library was asked");

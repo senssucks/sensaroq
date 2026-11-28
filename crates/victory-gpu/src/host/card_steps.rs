@@ -1844,6 +1844,39 @@ mod tests {
         own.list.close();
     }
 
+    /// The index by address finds the same writers as the scan of all of
+    /// them (`VICTORY_HOLDER_INDEX`): with writers that hold no host copy,
+    /// any that meets the range answers with that, else nothing holds it.
+    #[test]
+    fn the_holder_index_finds_what_the_scan_finds() {
+        let mut seed = 0x9e37_79b9_u64;
+        let mut next = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for _ in 0..50 {
+            let writers: Vec<Writer> = (0..40)
+                .map(|_| {
+                    let from = next(10_000);
+                    Writer { shadow: None, from, to: from + 1 + next(300), copy: false }
+                })
+                .collect();
+            let copy = |w: &Writer| Writer { shadow: None, ..*w };
+            let mut index = Holders::new(writers.iter().map(copy).collect());
+            let mut all: Vec<Writer> = writers.iter().map(copy).collect();
+            let extra = Writer { shadow: None, from: 20_000, to: 20_010, copy: true };
+            index.push(copy(&extra));
+            all.push(extra);
+            for _ in 0..200 {
+                let from = next(20_100);
+                let to = from + 1 + next(200);
+                assert_eq!(index.holder(from, to).err(), holder(&all, from, to).err(), "[{from}, {to})");
+            }
+        }
+    }
+
     /// Buffers between are sized to what a submission needs, a pooled one is
     /// taken only if it holds that, and the pool keeps its largest.
     #[test]
