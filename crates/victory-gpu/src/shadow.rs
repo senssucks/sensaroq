@@ -6516,7 +6516,7 @@ mod window_line_tests {
         assert_eq!(line_percent(Some(" 90 "), true), 90);
         assert_eq!(line_percent(Some("99"), false), 97);
         assert_eq!(line_percent(Some("10"), false), 50);
-        // Session 32's card: 1.8 GB of windows fit under a line of 90.
+        // Session 32's card: over a line of 80, and 1.8 GB more of windows fit under 95.
         let budget = 14_809u64 << 20;
         assert!(12_100u64 << 20 > budget / 100 * 80);
         assert!((12_100u64 << 20) + (1_800 << 20) < budget / 100 * 95);
